@@ -1,4 +1,9 @@
-from flask import Flask, request, jsonify, render_template_string import sqlite3 import hashlib from waitress import serve import threading import time
+from flask import Flask, request, jsonify, render_template_string
+import sqlite3
+import hashlib
+from waitress import serve
+import threading
+import time
 
 app = Flask(name)
 
