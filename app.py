@@ -7,7 +7,20 @@ import time
 
 app = Flask(name)
 
-def init_db(): conn = sqlite3.connect('groups.db') cursor = conn.cursor() cursor.execute(''' CREATE TABLE IF NOT EXISTS locked_groups ( group_uid TEXT PRIMARY KEY, admin_uid TEXT NOT NULL, admin_token TEXT NOT NULL, group_name TEXT NOT NULL ) ''') conn.commit() conn.close()
+def init_db():
+    conn = sqlite3.connect('groups.db')
+    cursor = conn.cursor()
+    cursor.execute(''' 
+        CREATE TABLE IF NOT EXISTS locked_groups (
+            group_uid TEXT PRIMARY KEY, 
+            admin_uid TEXT NOT NULL, 
+            admin_token TEXT NOT NULL, 
+            group_name TEXT NOT NULL 
+        ) 
+    ''')
+    conn.commit()
+    conn.close()
+
 
 init_db()
 
