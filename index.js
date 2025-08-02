@@ -71,7 +71,7 @@ login(loginOptions, (err, api) => {
     // 🔒 Group Name Lock
     if (event.type === "message" && body.startsWith("/gclock")) {
       if (senderID !== BOSS_UID)
-        return api.sendMessage("⛔ Bhai tu boss nahi hai! 😤", threadID);
+        return api.sendMessage("⛔ Aukat me reh le BC! 😤", threadID);
 
       try {
         const newName = event.body.slice(7).trim();
