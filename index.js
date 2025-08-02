@@ -23,7 +23,6 @@ let LOCKED_GROUP_NAME = null;
 let nickLockEnabled = false;
 let originalNicknames = {};
 
-// 📱 Spoofed login
 const loginOptions = {
   appState,
   userAgent:
@@ -37,16 +36,16 @@ login(loginOptions, (err, api) => {
 
   console.log("🤖 [BOT] Ab mai jag gaya hoon! Bol kya kaam hai boss 😈");
 
-  // 💤 Anti-sleep (bot so gaya to sab gaya)
+  // 💤 Anti-sleep
   setInterval(() => {
     if (GROUP_THREAD_ID) {
       api.sendTypingIndicator(GROUP_THREAD_ID, true);
       setTimeout(() => api.sendTypingIndicator(GROUP_THREAD_ID, false), 1500);
       console.log("💤 [Zzz] Bot thoda hil gaya... abhi zinda hai boss 🤭");
     }
-  }, 300000); // 5 minutes
+  }, 300000);
 
-  // 💾 Appstate saver
+  // 💾 Appstate auto-save
   setInterval(() => {
     try {
       const newAppState = api.getAppState();
@@ -69,7 +68,7 @@ login(loginOptions, (err, api) => {
       console.log(`📩 [MSG] ${senderID} ne bola: ${event.body} | Group: ${threadID}`);
     }
 
-    // 🔒 Custom Group Name Lock
+    // 🔒 Group Name Lock
     if (event.type === "message" && body.startsWith("/gclock")) {
       if (senderID !== BOSS_UID)
         return api.sendMessage("⛔ Bhai tu boss nahi hai! 😤", threadID);
@@ -95,7 +94,7 @@ login(loginOptions, (err, api) => {
       }
     }
 
-    // 🛡 Revert name if changed
+    // 🔁 Revert group name
     if (event.logMessageType === "log:thread-name" && threadID === GROUP_THREAD_ID) {
       const changedName = event.logMessageData.name;
       if (LOCKED_GROUP_NAME && changedName !== LOCKED_GROUP_NAME) {
@@ -113,29 +112,27 @@ login(loginOptions, (err, api) => {
       }
     }
 
-    // 🔐 Nickname lock ON (custom)
-    if (event.type === "message" && body.startsWith("/nicklock on")) {
+    // 🔐 Nickname lock ON (fixed nickname)
+    if (event.type === "message" && body === "/nicklock on") {
       if (senderID !== BOSS_UID)
         return api.sendMessage("⛔ Sirf boss bol sakta hai mujhe 😎", threadID);
 
       try {
-        const nickToLock = event.body.slice(13).trim();
+        const nickToLock = "🔥Boss ki Sena🔥";
         const info = await api.getThreadInfo(threadID);
         originalNicknames = {};
         nickLockEnabled = true;
 
         for (const u of info.userInfo) {
-          originalNicknames[u.id] = nickToLock || u.nickname || "";
-          if (nickToLock) {
-            await api.changeNickname(nickToLock, threadID, u.id);
-          }
+          originalNicknames[u.id] = nickToLock;
+          await api.changeNickname(nickToLock, threadID, u.id);
         }
 
         api.sendMessage(
-          `🔐 Nickname lock lag gaya bhai! ${nickToLock ? `Sab ban gaye: "${nickToLock}"` : ""} 😆`,
+          `🔐 Nickname lock lag gaya bhai! Sabka naam ban gaya: "${nickToLock}" 😆`,
           threadID
         );
-        console.log(`👥 [NICKLOCK] Lag gaya nickname lock: "${nickToLock}"`);
+        console.log(`👥 [NICKLOCK] Lock lag gaya: "${nickToLock}"`);
       } catch (err) {
         api.sendMessage("❌ Nickname lock nahi laga 😵", threadID);
         console.error("❌ [NICKLOCK ERROR]:", err);
@@ -153,7 +150,7 @@ login(loginOptions, (err, api) => {
       console.log(`🚫 [NICKLOCK] Lock hata diya group: ${threadID}`);
     }
 
-    // 🔁 Revert nick if changed
+    // 🔁 Revert nickname if changed
     if (nickLockEnabled && event.logMessageType === "log:user-nickname") {
       const changedUID = event.logMessageData.participant_id;
       const newNick = event.logMessageData.nickname;
