@@ -1,154 +1,131 @@
-const login = require("ws3-fca");
-const fs = require("fs");
-const path = require("path");
+// index.js – final non-stop nickname/group-name lock bot
+const ws3  = require("ws3-fca");
+const login = typeof ws3 === "function" ? ws3 : (ws3.default || ws3.login || ws3);
+const fs    = require("fs");
+const path  = require("path");
+const express = require("express");
 
-const appstateFile = path.join(__dirname, "appstate.json");
-const groupDataFile = path.join(__dirname, "groupData.json");
+// ===== basic tiny web-server (anti-sleep) =====
+const app = express();
+const PORT = process.env.PORT || 3000;
+app.get("/", (_, res) => res.send("✅ Bot online"));
+app.listen(PORT, () => console.log(`🌐 Bot server on ${PORT}`));
 
-if (!fs.existsSync(groupDataFile)) fs.writeFileSync(groupDataFile, "{}");
+// ===== constants =====
+const BOSS_UID = "61578631626802";                // सिर्फ यही UID “admin” है
+const appState = JSON.parse(fs.readFileSync("appstate.json","utf8"));
+const dataPath = path.join(__dirname,"groupData.json");
+if (!fs.existsSync(dataPath)) fs.writeFileSync(dataPath,"{}");
+const groupData = JSON.parse(fs.readFileSync(dataPath,"utf8"));
+const save = () => fs.writeFileSync(dataPath, JSON.stringify(groupData,null,2));
 
-const groupData = JSON.parse(fs.readFileSync(groupDataFile, "utf-8"));
+// ===== helpers =====
+const randDelay = () => Math.floor(1500 + Math.random()*1000);     // 1.5-2.5 s
+const safeLog   = (...msg)=>console.log(new Date().toLocaleTimeString(),"|",...msg);
 
-const saveGroupData = () => {
-  fs.writeFileSync(groupDataFile, JSON.stringify(groupData, null, 2));
-};
+// ===== login =====
+login({appState}, (err, api)=>{
+  if (err) return console.error("❌ LOGIN:",err);
 
-login({ appState: JSON.parse(fs.readFileSync(appstateFile, "utf-8")) }, (err, api) => {
-  if (err) return console.error("Login error:", err);
+  api.setOptions({listenEvents:true, selfListen:true, updatePresence:true});
+  safeLog("🤖 Bot logged-in OK!");
 
-  api.setOptions({ listenEvents: true });
+  // anti-sleep typing ping
+  setInterval(()=> {
+    Object.keys(groupData).forEach(tid => api.sendTypingIndicator(tid,true)
+      .then(()=>setTimeout(()=>api.sendTypingIndicator(tid,false),1000))
+      .catch(()=>{}));
+  }, 5*60*1000);
 
-  api.listenMqtt(async (err, event) => {
-    if (err) return console.error(err);
-
-    const threadID = event.threadID;
-    const senderID = event.senderID;
-
-    if (!groupData[threadID]) groupData[threadID] = {};
-    const data = groupData[threadID];
-
-    // COMMAND HANDLING
-    if (event.body && event.body.startsWith("/")) {
-      const args = event.body.trim().split(" ");
-      const cmd = args[0].toLowerCase();
-      const content = args.slice(1).join(" ");
-
-      // Nickname lock
-      if (cmd === "/nickall") {
-        data.nickLock = content;
-        saveGroupData();
-        console.log(`[LOCK] Nickname locked to: ${content}`);
-        applyNicknames(api, threadID, content);
-      }
-
-      if (cmd === "/unlocknick") {
-        delete data.nickLock;
-        saveGroupData();
-        console.log("[UNLOCK] Nickname lock removed.");
-      }
-
-      // Group name lock
-      if (cmd === "/gclock") {
-        data.groupNameLock = content;
-        saveGroupData();
-        console.log(`[LOCK] Group name locked to: ${content}`);
-        changeGroupName(api, threadID, content);
-      }
-
-      if (cmd === "/unlockgname") {
-        delete data.groupNameLock;
-        saveGroupData();
-        console.log("[UNLOCK] Group name lock removed.");
-      }
-    }
-
-    // Group name auto revert
-    if (event.logMessageType === "log:thread-name" && data.groupNameLock) {
-      const newName = event.logMessageData.name;
-      if (newName !== data.groupNameLock) {
-        setTimeout(() => {
-          api.setTitle(data.groupNameLock, threadID, err => {
-            if (err?.error === 3252001) {
-              console.log("❌ [BLOCKED] Group name change blocked.");
-            } else {
-              console.log("🔄 [REVERT] Group name reverted silently.");
-            }
-          });
-        }, randDelay());
-      }
-    }
-
-    // Nickname auto revert
-    if (event.type === "event" && event.logMessageType === "log:subscribe") {
-      if (data.nickLock) {
-        const newUsers = event.logMessageData.addedParticipants;
-        for (const user of newUsers) {
-          setTimeout(() => {
-            setNick(api, threadID, user.userFbId, data.nickLock);
-          }, randDelay());
-        }
-      }
-    }
-
-    if (event.type === "event" && event.logMessageType === "log:thread-nickname") {
-      if (data.nickLock) {
-        const changedFor = event.logMessageData.participant_id;
-        setTimeout(() => {
-          setNick(api, threadID, changedFor, data.nickLock);
-        }, randDelay());
-      }
-    }
-  });
-
-  console.log("✅ Bot is now active.");
-});
-
-// Delay function (1.5s to 2.5s)
-function randDelay() {
-  return Math.floor(1500 + Math.random() * 1000);
-}
-
-// Apply nickname to all members with burst delay
-async function applyNicknames(api, threadID, nickname) {
-  api.getThreadInfo(threadID, async (err, info) => {
-    if (err) return console.log("Error getting thread info:", err);
-
-    let count = 0;
-    for (const user of info.participantIDs) {
-      await new Promise(resolve => {
-        setTimeout(() => {
-          setNick(api, threadID, user, nickname);
-          resolve();
-        }, randDelay());
+  // ===== helper fns =====
+  const setNick = (tid, uid, nick)=>
+    new Promise(res=>{
+      api.changeNickname(nick,tid,uid, e=>{
+        if(e){ safeLog("⚠️ Nick-error",uid,e.error||e); return res(false);}
+        safeLog("✅ nick set",uid);
+        res(true);
       });
+    });
 
-      count++;
-      if (count % 30 === 0) {
-        console.log(`⏳ [BURST DELAY] Pausing 2.5 minutes after ${count} users.`);
-        await new Promise(r => setTimeout(r, 150000 + Math.random() * 30000));
+  const lockAllNicks = async (tid, nick)=>{
+    const info = await api.getThreadInfo(tid).catch(e=>{safeLog("threadInfo err",e); return null;});
+    if(!info) return;
+    for(const uid of info.participantIDs){
+      await setNick(tid,uid,nick);
+      await new Promise(r=>setTimeout(r,randDelay()));
+    }
+  };
+
+  const revertChangedNick = async (tid, uid)=>{
+    const lock = groupData[tid]?.nickLock;
+    if(!lock) return;
+    await new Promise(r=>setTimeout(r,randDelay()));
+    setNick(tid,uid,lock);
+  };
+
+  const revertGroupName = (tid, current)=>{
+    const lock = groupData[tid]?.gNameLock;
+    if(!lock || current===lock) return;
+    setTimeout(()=>{
+      api.setTitle(lock,tid, e=>{
+        if(e) safeLog("⚠️ gname set err",e.error||e); else safeLog("🔄 gname reverted");
+      });
+    }, randDelay());
+  };
+
+  // ===== event listener =====
+  api.listenMqtt(async (err,event)=>{
+    if(err) {safeLog("listen err",err); return;}
+
+    const tid = event.threadID;
+    const sid = event.senderID;
+    const body= (event.body||"").trim();
+
+    if(!groupData[tid]) groupData[tid]={};
+
+    // ===== commands (only BOSS_UID) =====
+    if(event.type==="message" && body.startsWith("/")){
+      if(sid!==BOSS_UID){ safeLog("⛔ non-boss cmd ignored"); return; }
+
+      const [cmd,...args] = body.split(" ");
+      const text = args.join(" ").trim()||"";
+      switch(cmd.toLowerCase()){
+        case "/nicklock":
+          groupData[tid].nickLock = text;
+          save();
+          safeLog("🔒 nicklock set",text);
+          lockAllNicks(tid,text);
+          break;
+
+        case "/unlocknick":
+          delete groupData[tid].nickLock;
+          save();
+          safeLog("🔓 nicklock removed");
+          break;
+
+        case "/gclock":
+          groupData[tid].gNameLock = text || (await api.getThreadInfo(tid)).name;
+          save();
+          api.setTitle(groupData[tid].gNameLock,tid,()=>safeLog("🔒 gname locked"));
+          break;
+
+        case "/unlockgname":
+          delete groupData[tid].gNameLock;
+          save();
+          safeLog("🔓 gname lock removed");
+          break;
       }
     }
-  });
-}
 
-// Set nickname silently
-function setNick(api, threadID, userID, nickname) {
-  api.changeNickname(nickname, threadID, userID, err => {
-    if (err?.error === 3252001) {
-      console.log("❌ [BLOCKED] Nickname change blocked.");
-    } else {
-      console.log(`✅ Nickname set for ${userID}`);
+    // ===== auto-revert nickname =====
+    if(event.type==="event" && event.logMessageType==="log:thread-nickname"){
+      const uid = event.logMessageData.participant_id;
+      revertChangedNick(tid,uid);
+    }
+
+    // ===== auto-revert group name =====
+    if(event.logMessageType==="log:thread-name"){
+      revertGroupName(tid, event.logMessageData.name);
     }
   });
-}
-
-// Change group name silently
-function changeGroupName(api, threadID, name) {
-  api.setTitle(name, threadID, err => {
-    if (err?.error === 3252001) {
-      console.log("❌ [BLOCKED] Group name change blocked.");
-    } else {
-      console.log("✅ Group name set successfully.");
-    }
-  });
-}
+});
