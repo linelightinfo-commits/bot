@@ -1,199 +1,154 @@
-const ws3 = require("ws3-fca");
-const login = typeof ws3 === "function" ? ws3 : (ws3.default || ws3.login || ws3);
+const login = require("ws3-fca");
 const fs = require("fs");
-const express = require("express");
+const path = require("path");
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+const appstateFile = path.join(__dirname, "appstate.json");
+const groupDataFile = path.join(__dirname, "groupData.json");
 
-app.get("/", (req, res) => {
-  res.send("✅ Facebook Bot is dancing online! Logs are in console 🎉");
-});
-app.listen(PORT, () => {
-  console.log(`🌐 [SERVER] Bot ka chhota server ab nach raha hai on port ${PORT} 🚀`);
-});
+if (!fs.existsSync(groupDataFile)) fs.writeFileSync(groupDataFile, "{}");
 
-const BOSS_UID = "61578631626802";
+const groupData = JSON.parse(fs.readFileSync(groupDataFile, "utf-8"));
 
-const appStatePath = "appstate.json";
-const appState = JSON.parse(fs.readFileSync(appStatePath, "utf-8"));
-
-let GROUP_THREAD_ID = null;
-let LOCKED_GROUP_NAME = null;
-let nickLockEnabled = false;
-let originalNicknames = {};
-
-const loginOptions = {
-  appState,
-  userAgent:
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 FBAV/350.0.0.8.103",
+const saveGroupData = () => {
+  fs.writeFileSync(groupDataFile, JSON.stringify(groupData, null, 2));
 };
 
-login(loginOptions, (err, api) => {
-  if (err) return console.error("❌ [LOGIN TUT GAYA 😭]:", err);
+login({ appState: JSON.parse(fs.readFileSync(appstateFile, "utf-8")) }, (err, api) => {
+  if (err) return console.error("Login error:", err);
 
-  api.setOptions({ listenEvents: true, selfListen: true, updatePresence: true });
-
-  console.log("🤖 [BOT] Ab mai jag gaya hoon! Bol kya kaam hai boss 😈");
-
-  setInterval(() => {
-    if (GROUP_THREAD_ID) {
-      api.sendTypingIndicator(GROUP_THREAD_ID, true);
-      setTimeout(() => api.sendTypingIndicator(GROUP_THREAD_ID, false), 1500);
-      console.log("💤 [Zzz] Bot thoda hil gaya... abhi zinda hai boss 🤭");
-    }
-  }, 300000);
-
-  setInterval(() => {
-    try {
-      const newAppState = api.getAppState();
-      fs.writeFileSync(appStatePath, JSON.stringify(newAppState, null, 2));
-      console.log("💾 [Backup] Appstate safe kar diya bhai 🚨");
-    } catch (e) {
-      console.error("❌ [Backup fail hogya 😵]:", e);
-    }
-  }, 600000);
+  api.setOptions({ listenEvents: true });
 
   api.listenMqtt(async (err, event) => {
-    if (err) return console.error("❌ [SUNAI NHI DE RAHA BHAI 😵‍💫]:", err);
+    if (err) return console.error(err);
 
-    const senderID = event.senderID;
     const threadID = event.threadID;
-    const body = (event.body || "").toLowerCase();
+    const senderID = event.senderID;
 
-    if (event.type === "message") {
-      console.log(`📩 [MSG] ${senderID} ne bola: ${event.body} | Group: ${threadID}`);
-    }
+    if (!groupData[threadID]) groupData[threadID] = {};
+    const data = groupData[threadID];
 
-    if (event.type === "message" && body.startsWith("/gclock")) {
-      if (senderID !== BOSS_UID)
-        return api.sendMessage("⛔ Aukat me reh le BC! 😤", threadID);
+    // COMMAND HANDLING
+    if (event.body && event.body.startsWith("/")) {
+      const args = event.body.trim().split(" ");
+      const cmd = args[0].toLowerCase();
+      const content = args.slice(1).join(" ");
 
-      try {
-        const newName = event.body.slice(7).trim();
-        GROUP_THREAD_ID = threadID;
+      // Nickname lock
+      if (cmd === "/nickall") {
+        data.nickLock = content;
+        saveGroupData();
+        console.log(`[LOCK] Nickname locked to: ${content}`);
+        applyNicknames(api, threadID, content);
+      }
 
-        if (newName.length > 0) {
-          await api.setTitle(newName, threadID);
-          LOCKED_GROUP_NAME = newName;
-          api.sendMessage(`🔒 Naam fix ho gaya bhai: "${LOCKED_GROUP_NAME}" 🤐`, threadID);
-          console.log(`🛡️ [LOCKED] Naam lock hua custom: "${LOCKED_GROUP_NAME}"`);
-        } else {
-          const info = await api.getThreadInfo(threadID);
-          LOCKED_GROUP_NAME = info.name;
-          api.sendMessage(`🔒 Naam lock ho gaya: "${LOCKED_GROUP_NAME}"`, threadID);
-          console.log(`🔐 [LOCKED] Naam pakad liya: "${LOCKED_GROUP_NAME}"`);
-        }
-      } catch (e) {
-        api.sendMessage("❌ Naam lock nahi hua bhai 😩", threadID);
-        console.error("❌ [GCLOCK ERROR]:", e);
+      if (cmd === "/unlocknick") {
+        delete data.nickLock;
+        saveGroupData();
+        console.log("[UNLOCK] Nickname lock removed.");
+      }
+
+      // Group name lock
+      if (cmd === "/gclock") {
+        data.groupNameLock = content;
+        saveGroupData();
+        console.log(`[LOCK] Group name locked to: ${content}`);
+        changeGroupName(api, threadID, content);
+      }
+
+      if (cmd === "/unlockgname") {
+        delete data.groupNameLock;
+        saveGroupData();
+        console.log("[UNLOCK] Group name lock removed.");
       }
     }
 
-    if (event.logMessageType === "log:thread-name" && threadID === GROUP_THREAD_ID) {
-      const changedName = event.logMessageData.name;
-      if (LOCKED_GROUP_NAME && changedName !== LOCKED_GROUP_NAME) {
-        try {
-          await api.setTitle(LOCKED_GROUP_NAME, threadID);
-          api.sendMessage(
-            `⚠️ Kisi ne naam badla! "${changedName}" se wapas "${LOCKED_GROUP_NAME}" 🛑`,
-            threadID
-          );
-          console.log(`😤 [REVERT] Naam wapas ghuma diya: "${changedName}" -> "${LOCKED_GROUP_NAME}"`);
-        } catch (e) {
-          api.sendMessage("❌ Naam wapas nahi ghuma paya, admin bana mujhe! 😭", threadID);
-          console.error("❌ [NAAM REVERT FAIL]:", e);
-        }
-      }
-    }
-
-    // 🔐 Nickname lock with delay and console-only block log
-    if (event.type === "message" && body === "/nicklock on") {
-      if (senderID !== BOSS_UID)
-        return api.sendMessage("⛔ Sirf boss bol sakta hai mujhe 😎", threadID);
-
-      try {
-        const nickToLock = "😈😈 ᴢᴀʟɪᴍ࿐ʟᴀᴅᴋᴀ";
-        const info = await api.getThreadInfo(threadID);
-        const users = info.userInfo;
-
-        originalNicknames = {};
-        nickLockEnabled = true;
-
-        api.sendMessage(`🔐 Nickname lock chalu ho gaya bhai... lagane de ab sabka! 😏`, threadID);
-
-        // 🧠 Function to apply nickname with delay
-        const applyNicknames = async () => {
-          let count = 0;
-
-          // Sabse pehle bot apna naam change kare
-          const botUser = users.find((u) => u.id === api.getCurrentUserID());
-          if (botUser) {
-            try {
-              originalNicknames[botUser.id] = nickToLock;
-              await api.changeNickname(nickToLock, threadID, botUser.id);
-              console.log(`✅ [BOT NICK] Apna nick change ho gaya`);
-            } catch (err) {
-              console.log("🚫 [BLOCKED] FB ne rok diya nickname change karne se (bot pe)");
+    // Group name auto revert
+    if (event.logMessageType === "log:thread-name" && data.groupNameLock) {
+      const newName = event.logMessageData.name;
+      if (newName !== data.groupNameLock) {
+        setTimeout(() => {
+          api.setTitle(data.groupNameLock, threadID, err => {
+            if (err?.error === 3252001) {
+              console.log("❌ [BLOCKED] Group name change blocked.");
+            } else {
+              console.log("🔄 [REVERT] Group name reverted silently.");
             }
-          }
-
-          for (const u of users) {
-            if (u.id === api.getCurrentUserID()) continue;
-
-            try {
-              await new Promise((res) =>
-                setTimeout(res, Math.floor(Math.random() * 2000) + 3000)
-              ); // 3-5 sec delay
-
-              originalNicknames[u.id] = nickToLock;
-              await api.changeNickname(nickToLock, threadID, u.id);
-              console.log(`✅ Nickname changed: ${u.name} (${u.id})`);
-
-              count++;
-              if (count % 30 === 0) {
-                console.log("⏳ [WAIT] 30 users ho gaye, 3 min ruk rahe...");
-                await new Promise((res) => setTimeout(res, 180000));
-              }
-            } catch (err) {
-              console.log(`🚫 [BLOCKED] FB ne rok diya: UID ${u.id}`);
-            }
-          }
-
-          console.log("🎉 [DONE] Sabka nickname change ho gaya boss!");
-          api.sendMessage(`✅ Nickname lock done! Ab koi bacha nahi... sab zalim ban gaye 😈`, threadID);
-        };
-
-        applyNicknames();
-      } catch (err) {
-        api.sendMessage("❌ Nickname lock nahi laga 😵", threadID);
-        console.error("❌ [NICKLOCK ERROR]:", err);
+          });
+        }, randDelay());
       }
     }
 
-    if (event.type === "message" && body === "/nicklock off") {
-      if (senderID !== BOSS_UID)
-        return api.sendMessage("⛔ Bhai boss hi bol sakta hai mujhe! 😤", threadID);
-
-      nickLockEnabled = false;
-      originalNicknames = {};
-      api.sendMessage("🔓 Nickname lock hata diya gaya bhai 😌", threadID);
-      console.log(`🚫 [NICKLOCK] Lock hata diya group: ${threadID}`);
+    // Nickname auto revert
+    if (event.type === "event" && event.logMessageType === "log:subscribe") {
+      if (data.nickLock) {
+        const newUsers = event.logMessageData.addedParticipants;
+        for (const user of newUsers) {
+          setTimeout(() => {
+            setNick(api, threadID, user.userFbId, data.nickLock);
+          }, randDelay());
+        }
+      }
     }
 
-    if (nickLockEnabled && event.logMessageType === "log:user-nickname") {
-      const changedUID = event.logMessageData.participant_id;
-      const newNick = event.logMessageData.nickname;
-      const originalNick = originalNicknames[changedUID];
-
-      if (originalNick !== undefined && newNick !== originalNick) {
-        try {
-          await api.changeNickname(originalNick, threadID, changedUID);
-          console.log(`↩️ [REVERT] "${newNick}" se wapas "${originalNick}" ban gaya (UID: ${changedUID})`);
-        } catch (err) {
-          console.error("❌ [NICK REVERT FAIL 😭]:", err);
-        }
+    if (event.type === "event" && event.logMessageType === "log:thread-nickname") {
+      if (data.nickLock) {
+        const changedFor = event.logMessageData.participant_id;
+        setTimeout(() => {
+          setNick(api, threadID, changedFor, data.nickLock);
+        }, randDelay());
       }
     }
   });
+
+  console.log("✅ Bot is now active.");
 });
+
+// Delay function (1.5s to 2.5s)
+function randDelay() {
+  return Math.floor(1500 + Math.random() * 1000);
+}
+
+// Apply nickname to all members with burst delay
+async function applyNicknames(api, threadID, nickname) {
+  api.getThreadInfo(threadID, async (err, info) => {
+    if (err) return console.log("Error getting thread info:", err);
+
+    let count = 0;
+    for (const user of info.participantIDs) {
+      await new Promise(resolve => {
+        setTimeout(() => {
+          setNick(api, threadID, user, nickname);
+          resolve();
+        }, randDelay());
+      });
+
+      count++;
+      if (count % 30 === 0) {
+        console.log(`⏳ [BURST DELAY] Pausing 2.5 minutes after ${count} users.`);
+        await new Promise(r => setTimeout(r, 150000 + Math.random() * 30000));
+      }
+    }
+  });
+}
+
+// Set nickname silently
+function setNick(api, threadID, userID, nickname) {
+  api.changeNickname(nickname, threadID, userID, err => {
+    if (err?.error === 3252001) {
+      console.log("❌ [BLOCKED] Nickname change blocked.");
+    } else {
+      console.log(`✅ Nickname set for ${userID}`);
+    }
+  });
+}
+
+// Change group name silently
+function changeGroupName(api, threadID, name) {
+  api.setTitle(name, threadID, err => {
+    if (err?.error === 3252001) {
+      console.log("❌ [BLOCKED] Group name change blocked.");
+    } else {
+      console.log("✅ Group name set successfully.");
+    }
+  });
+}
