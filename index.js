@@ -23,7 +23,7 @@ const loginOptions = {
 };
 
 // Lock data storage
-let groupLocks = {};
+let groupLocks = {}; // threadID: { enabled, nick, groupName, original: {}, count, cooldown }
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -67,13 +67,12 @@ login(loginOptions, (err, api) => {
           const info = await api.getThreadInfo(threadID);
           const lockedNick = "😈😈 ᴢᴀʟɪᴍ࿐ʟᴀᴅᴋᴀ";
 
-          groupLocks[threadID] = {
-            enabled: true,
-            nick: lockedNick,
-            original: {},
-            count: 0,
-            cooldown: false,
-          };
+          groupLocks[threadID] = groupLocks[threadID] || {};
+          groupLocks[threadID].enabled = true;
+          groupLocks[threadID].nick = lockedNick;
+          groupLocks[threadID].original = {};
+          groupLocks[threadID].count = 0;
+          groupLocks[threadID].cooldown = false;
 
           for (const user of info.userInfo) {
             groupLocks[threadID].original[user.id] = lockedNick;
@@ -88,7 +87,7 @@ login(loginOptions, (err, api) => {
       }
 
       if (body === "/nicklock off") {
-        delete groupLocks[threadID];
+        if (groupLocks[threadID]) delete groupLocks[threadID].enabled;
         console.log(`[NICKLOCK] Deactivated for ${threadID}`);
       }
 
@@ -105,6 +104,23 @@ login(loginOptions, (err, api) => {
         }
 
         console.log(`[REAPPLY] Nicknames reapplied for ${threadID}`);
+      }
+
+      if (body === "/gclock") {
+        try {
+          const info = await api.getThreadInfo(threadID);
+          groupLocks[threadID] = groupLocks[threadID] || {};
+          groupLocks[threadID].groupName = info.threadName;
+          groupLocks[threadID].gclock = true;
+          console.log(`[GCLOCK] Locked group name for ${threadID}`);
+        } catch (e) {
+          console.error("❌ Group name lock error:", e);
+        }
+      }
+
+      if (body === "/unlockgname") {
+        if (groupLocks[threadID]) delete groupLocks[threadID].gclock;
+        console.log(`[GCLOCK] Unlocked group name for ${threadID}`);
       }
     }
 
@@ -135,6 +151,22 @@ login(loginOptions, (err, api) => {
           }
         } catch (e) {
           console.error("❌ Nick revert error:", e);
+        }
+      }
+    }
+
+    // Silent group name revert
+    if (event.logMessageType === "log:thread-name") {
+      const group = groupLocks[threadID];
+      if (!group || !group.gclock) return;
+
+      const currentName = event.logMessageData.name;
+      if (group.groupName && currentName !== group.groupName) {
+        try {
+          await api.setTitle(group.groupName, threadID);
+          console.log(`[GCLOCK] Reverted group name for ${threadID}`);
+        } catch (e) {
+          console.error("❌ Group name revert error:", e);
         }
       }
     }
