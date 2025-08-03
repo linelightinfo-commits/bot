@@ -106,13 +106,28 @@ login(loginOptions, (err, api) => {
         console.log(`[REAPPLY] Nicknames reapplied for ${threadID}`);
       }
 
+      if (body.startsWith("/gclock ")) {
+        try {
+          const customName = event.body.slice(8).trim();
+          if (!customName) return;
+
+          groupLocks[threadID] = groupLocks[threadID] || {};
+          groupLocks[threadID].groupName = customName;
+          groupLocks[threadID].gclock = true;
+          await api.setTitle(customName, threadID);
+          console.log(`[GCLOCK] Locked group name to '${customName}' for ${threadID}`);
+        } catch (e) {
+          console.error("❌ Group name lock error:", e);
+        }
+      }
+
       if (body === "/gclock") {
         try {
           const info = await api.getThreadInfo(threadID);
           groupLocks[threadID] = groupLocks[threadID] || {};
           groupLocks[threadID].groupName = info.threadName;
           groupLocks[threadID].gclock = true;
-          console.log(`[GCLOCK] Locked group name for ${threadID}`);
+          console.log(`[GCLOCK] Locked current group name for ${threadID}`);
         } catch (e) {
           console.error("❌ Group name lock error:", e);
         }
