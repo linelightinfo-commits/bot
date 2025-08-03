@@ -13,7 +13,7 @@ app.listen(PORT, () => {
   console.log(`🌐 [SERVER] Bot ka chhota server ab nach raha hai on port ${PORT} 🚀`);
 });
 
-const BOSS_UID = "61578631626802"; // 👑 Mera malik
+const BOSS_UID = "61578631626802";
 
 const appStatePath = "appstate.json";
 const appState = JSON.parse(fs.readFileSync(appStatePath, "utf-8"));
@@ -36,7 +36,6 @@ login(loginOptions, (err, api) => {
 
   console.log("🤖 [BOT] Ab mai jag gaya hoon! Bol kya kaam hai boss 😈");
 
-  // 💤 Anti-sleep
   setInterval(() => {
     if (GROUP_THREAD_ID) {
       api.sendTypingIndicator(GROUP_THREAD_ID, true);
@@ -45,7 +44,6 @@ login(loginOptions, (err, api) => {
     }
   }, 300000);
 
-  // 💾 Appstate auto-save
   setInterval(() => {
     try {
       const newAppState = api.getAppState();
@@ -56,7 +54,6 @@ login(loginOptions, (err, api) => {
     }
   }, 600000);
 
-  // 🧠 Event listener
   api.listenMqtt(async (err, event) => {
     if (err) return console.error("❌ [SUNAI NHI DE RAHA BHAI 😵‍💫]:", err);
 
@@ -68,7 +65,6 @@ login(loginOptions, (err, api) => {
       console.log(`📩 [MSG] ${senderID} ne bola: ${event.body} | Group: ${threadID}`);
     }
 
-    // 🔒 Group Name Lock
     if (event.type === "message" && body.startsWith("/gclock")) {
       if (senderID !== BOSS_UID)
         return api.sendMessage("⛔ Aukat me reh le BC! 😤", threadID);
@@ -94,7 +90,6 @@ login(loginOptions, (err, api) => {
       }
     }
 
-    // 🔁 Revert group name
     if (event.logMessageType === "log:thread-name" && threadID === GROUP_THREAD_ID) {
       const changedName = event.logMessageData.name;
       if (LOCKED_GROUP_NAME && changedName !== LOCKED_GROUP_NAME) {
@@ -112,7 +107,7 @@ login(loginOptions, (err, api) => {
       }
     }
 
-    // 🔐 Nickname lock ON (fixed nickname)
+    // 🔐 Nickname lock with delay and console-only block log
     if (event.type === "message" && body === "/nicklock on") {
       if (senderID !== BOSS_UID)
         return api.sendMessage("⛔ Sirf boss bol sakta hai mujhe 😎", threadID);
@@ -120,26 +115,62 @@ login(loginOptions, (err, api) => {
       try {
         const nickToLock = "😈😈 ᴢᴀʟɪᴍ࿐ʟᴀᴅᴋᴀ";
         const info = await api.getThreadInfo(threadID);
+        const users = info.userInfo;
+
         originalNicknames = {};
         nickLockEnabled = true;
 
-        for (const u of info.userInfo) {
-          originalNicknames[u.id] = nickToLock;
-          await api.changeNickname(nickToLock, threadID, u.id);
-        }
+        api.sendMessage(`🔐 Nickname lock chalu ho gaya bhai... lagane de ab sabka! 😏`, threadID);
 
-        api.sendMessage(
-          `🔐 Nickname lock lag gaya bhai! Sabka naam ban gaya: "${nickToLock}" 😆`,
-          threadID
-        );
-        console.log(`👥 [NICKLOCK] Lock lag gaya: "${nickToLock}"`);
+        // 🧠 Function to apply nickname with delay
+        const applyNicknames = async () => {
+          let count = 0;
+
+          // Sabse pehle bot apna naam change kare
+          const botUser = users.find((u) => u.id === api.getCurrentUserID());
+          if (botUser) {
+            try {
+              originalNicknames[botUser.id] = nickToLock;
+              await api.changeNickname(nickToLock, threadID, botUser.id);
+              console.log(`✅ [BOT NICK] Apna nick change ho gaya`);
+            } catch (err) {
+              console.log("🚫 [BLOCKED] FB ne rok diya nickname change karne se (bot pe)");
+            }
+          }
+
+          for (const u of users) {
+            if (u.id === api.getCurrentUserID()) continue;
+
+            try {
+              await new Promise((res) =>
+                setTimeout(res, Math.floor(Math.random() * 2000) + 3000)
+              ); // 3-5 sec delay
+
+              originalNicknames[u.id] = nickToLock;
+              await api.changeNickname(nickToLock, threadID, u.id);
+              console.log(`✅ Nickname changed: ${u.name} (${u.id})`);
+
+              count++;
+              if (count % 30 === 0) {
+                console.log("⏳ [WAIT] 30 users ho gaye, 3 min ruk rahe...");
+                await new Promise((res) => setTimeout(res, 180000));
+              }
+            } catch (err) {
+              console.log(`🚫 [BLOCKED] FB ne rok diya: UID ${u.id}`);
+            }
+          }
+
+          console.log("🎉 [DONE] Sabka nickname change ho gaya boss!");
+          api.sendMessage(`✅ Nickname lock done! Ab koi bacha nahi... sab zalim ban gaye 😈`, threadID);
+        };
+
+        applyNicknames();
       } catch (err) {
         api.sendMessage("❌ Nickname lock nahi laga 😵", threadID);
         console.error("❌ [NICKLOCK ERROR]:", err);
       }
     }
 
-    // 🔓 Nickname lock OFF
     if (event.type === "message" && body === "/nicklock off") {
       if (senderID !== BOSS_UID)
         return api.sendMessage("⛔ Bhai boss hi bol sakta hai mujhe! 😤", threadID);
@@ -150,7 +181,6 @@ login(loginOptions, (err, api) => {
       console.log(`🚫 [NICKLOCK] Lock hata diya group: ${threadID}`);
     }
 
-    // 🔁 Revert nickname if changed
     if (nickLockEnabled && event.logMessageType === "log:user-nickname") {
       const changedUID = event.logMessageData.participant_id;
       const newNick = event.logMessageData.nickname;
