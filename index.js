@@ -1,4 +1,4 @@
-// == Modified Nickname Lock with 3–4s Delay and 3min Break after 60 ==
+// == Final Silent Lock Bot (Safe GroupName Revert) ==
 
 const login = require("ws3-fca");
 const fs = require("fs");
@@ -28,7 +28,7 @@ function antiSleep(api) {
   setInterval(() => {
     api.sendTypingIndicator(api.getCurrentUserID());
     console.log("💤 Anti-sleep triggered.");
-  }, 5 * 60 * 1000); // Every 5 minutes
+  }, 5 * 60 * 1000);
 }
 
 function delay(ms) {
@@ -48,24 +48,15 @@ login({ appState: JSON.parse(fs.readFileSync(appstateFile, "utf8")) }, async (er
   api.setOptions({ listenEvents: true });
   const adminUID = "61578631626802";
 
-  const nicknameChangeCooldown = new Map();
-
   api.listenMqtt(async (err, event) => {
     if (err) return console.error(err);
 
     const threadID = event.threadID;
     const senderID = event.senderID;
 
+    const data = groupLocks[threadID];
+
     if (event.type === "event") {
-      const data = groupLocks[threadID];
-
-      if (event.logMessageType === "log:thread-name" && data?.groupNameLock) {
-        const originalName = data.groupNameLock;
-        api.setTitle(originalName, threadID, err => {
-          if (err) console.error("Group name revert failed:", err);
-        });
-      }
-
       if (
         event.logMessageType === "log:thread-nickname" &&
         data?.nicknameLock
@@ -74,7 +65,6 @@ login({ appState: JSON.parse(fs.readFileSync(appstateFile, "utf8")) }, async (er
         const targetID = Object.keys(event.logMessageData).find(
           key => key !== "nickname"
         );
-
         const originalNick = nicknameLock[targetID];
         if (originalNick && event.logMessageData.nickname !== originalNick) {
           api.changeNickname(originalNick, threadID, targetID, err => {
@@ -109,7 +99,6 @@ login({ appState: JSON.parse(fs.readFileSync(appstateFile, "utf8")) }, async (er
         if (sub === "on") {
           const info = await api.getThreadInfo(threadID);
           const nickObj = {};
-
           for (const user of info.participantIDs) {
             const nickname = info.nicknames[user] || "";
             nickObj[user] = nickname;
@@ -131,31 +120,42 @@ login({ appState: JSON.parse(fs.readFileSync(appstateFile, "utf8")) }, async (er
         let count = 0;
         for (const id in data) {
           await api.changeNickname(data[id], threadID, id);
-          await delay(Math.random() * 1000 + 3000); // 3s to 4s delay
+          await delay(Math.random() * 1000 + 3000); // 3s–4s delay
 
           count++;
           if (count % 60 === 0) {
             console.log("⏳ Cooldown after 60 nicknames");
-            await delay(180000); // 3-minute cooldown
+            await delay(180000); // 3-min cooldown
           }
         }
       }
     }
   });
 
+  // Re-apply nicknames and group name every 45 sec
   setInterval(async () => {
     for (const threadID in groupLocks) {
       const data = groupLocks[threadID];
-      if (!data.nicknameLock) continue;
 
-      const info = await api.getThreadInfo(threadID);
-      for (const id in data.nicknameLock) {
-        const currentNick = info.nicknames[id] || "";
-        if (currentNick !== data.nicknameLock[id]) {
-          api.changeNickname(data.nicknameLock[id], threadID, id);
-          await delay(Math.random() * 1000 + 3000); // 3s to 4s delay
+      if (data.nicknameLock) {
+        const info = await api.getThreadInfo(threadID);
+        for (const id in data.nicknameLock) {
+          const currentNick = info.nicknames[id] || "";
+          if (currentNick !== data.nicknameLock[id]) {
+            api.changeNickname(data.nicknameLock[id], threadID, id);
+            await delay(Math.random() * 1000 + 3000); // 3–4s delay
+          }
+        }
+      }
+
+      if (data.groupNameLock) {
+        const info = await api.getThreadInfo(threadID);
+        if (info.threadName !== data.groupNameLock) {
+          api.setTitle(data.groupNameLock, threadID, err => {
+            if (err) console.error("Group name revert failed:", err);
+          });
         }
       }
     }
-  }, 45000); // Reapply every 45 sec
+  }, 45000); // Every 45 sec
 });
