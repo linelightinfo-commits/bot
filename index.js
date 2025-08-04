@@ -1,5 +1,3 @@
-// == Final Silent Lock Bot (Safe GroupName Revert) ==
-
 const login = require("ws3-fca");
 const fs = require("fs");
 const path = require("path");
@@ -8,154 +6,136 @@ const http = require("http");
 const appstateFile = path.join(__dirname, "appstate.json");
 const groupDataFile = path.join(__dirname, "groupData.json");
 
-let groupLocks = {};
+let appstate = JSON.parse(fs.readFileSync(appstateFile, "utf8"));
+let groupLocks = fs.existsSync(groupDataFile) ? JSON.parse(fs.readFileSync(groupDataFile, "utf8")) : {};
+let nickChangeCounter = {};
 
-if (fs.existsSync(groupDataFile)) {
-  groupLocks = JSON.parse(fs.readFileSync(groupDataFile, "utf8"));
-  console.log("🔁 Loaded saved group locks.");
-}
-
-function saveGroupLocks() {
+function saveGroupData() {
   fs.writeFileSync(groupDataFile, JSON.stringify(groupLocks, null, 2));
 }
 
-function backupAppstate() {
-  fs.copyFileSync(appstateFile, path.join(__dirname, "appstate_backup.json"));
-  console.log("💾 Appstate backed up.");
+function backupAppState() {
+  fs.writeFileSync("appstate.backup.json", JSON.stringify(appstate, null, 2));
 }
 
-function antiSleep(api) {
-  setInterval(() => {
-    api.sendTypingIndicator(api.getCurrentUserID());
-    console.log("💤 Anti-sleep triggered.");
-  }, 5 * 60 * 1000);
+function sleep(ms) {
+  return new Promise(res => setTimeout(res, ms));
 }
 
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+login({ appState: appstate }, async (err, api) => {
+  if (err) return console.error("Login Error:", err);
 
-login({ appState: JSON.parse(fs.readFileSync(appstateFile, "utf8")) }, async (err, api) => {
-  if (err) return console.error(err);
-
-  console.log("🌐 Bot server started on port 10000");
-  http.createServer(() => {}).listen(10000);
-
+  appstate = api.getAppState();
   console.log("✅ Logged in as:", api.getCurrentUserID());
-  antiSleep(api);
-  setInterval(backupAppstate, 10 * 60 * 1000);
 
-  api.setOptions({ listenEvents: true });
+  api.setOptions({ listenEvents: true, selfListen: false });
   const adminUID = "61578631626802";
 
-  api.listenMqtt(async (err, event) => {
-    if (err) return console.error(err);
+  setInterval(() => backupAppState(), 10 * 60 * 1000);
+  setInterval(() => {
+    Object.keys(groupLocks).forEach(threadID => {
+      api.sendTypingIndicator(threadID).catch(() => {});
+    });
+    console.log("💤 Anti-sleep triggered.");
+  }, 5 * 60 * 1000);
 
-    const threadID = event.threadID;
-    const senderID = event.senderID;
+  api.listenMqtt(async event => {
+    if (event.type === "message" && event.body && event.senderID === adminUID) {
+      const args = event.body.trim().split(" ");
+      const command = args[0].toLowerCase();
+      const threadID = event.threadID;
 
-    const data = groupLocks[threadID];
-
-    if (event.type === "event") {
-      if (
-        event.logMessageType === "log:thread-nickname" &&
-        data?.nicknameLock
-      ) {
-        const { nicknameLock } = data;
-        const targetID = Object.keys(event.logMessageData).find(
-          key => key !== "nickname"
-        );
-        const originalNick = nicknameLock[targetID];
-        if (originalNick && event.logMessageData.nickname !== originalNick) {
-          api.changeNickname(originalNick, threadID, targetID, err => {
-            if (err) console.error("Nickname revert failed:", err);
+      if (command === "/nicklock") {
+        if (args[1] === "on") {
+          const threadInfo = await api.getThreadInfo(threadID);
+          groupLocks[threadID] = groupLocks[threadID] || {};
+          groupLocks[threadID].nicknames = {};
+          threadInfo.userInfo.forEach(u => {
+            if (u.nickname) groupLocks[threadID].nicknames[u.id] = u.nickname;
           });
+          saveGroupData();
+        } else if (args[1] === "off") {
+          if (groupLocks[threadID]) delete groupLocks[threadID].nicknames;
+          saveGroupData();
         }
+      }
+
+      if (command === "/gclock") {
+        const name = args.slice(1).join(" ");
+        if (!groupLocks[threadID]) groupLocks[threadID] = {};
+        groupLocks[threadID].groupName = name;
+        saveGroupData();
+        await api.setTitle(name, threadID);
+      }
+
+      if (command === "/unlockgname") {
+        if (groupLocks[threadID]) delete groupLocks[threadID].groupName;
+        saveGroupData();
+      }
+
+      if (command === "/unlocknick") {
+        if (groupLocks[threadID]) delete groupLocks[threadID].nicknames;
+        saveGroupData();
+      }
+
+      if (command === "/nickall") {
+        const threadInfo = await api.getThreadInfo(threadID);
+        groupLocks[threadID] = groupLocks[threadID] || {};
+        groupLocks[threadID].nicknames = {};
+        threadInfo.userInfo.forEach(u => {
+          if (u.nickname) groupLocks[threadID].nicknames[u.id] = u.nickname;
+        });
+        saveGroupData();
       }
     }
 
-    if (event.type === "message" && event.body && senderID === adminUID) {
-      const args = event.body.trim().split(/ +/);
-      const cmd = args[0].toLowerCase();
+    if (event.type === "event") {
+      const threadID = event.threadID;
+      const lock = groupLocks[threadID];
 
-      if (cmd === "/gclock") {
-        const newName = args.slice(1).join(" ");
-        if (!newName) return;
-
-        groupLocks[threadID] = groupLocks[threadID] || {};
-        groupLocks[threadID].groupNameLock = newName;
-        saveGroupLocks();
-
-        api.setTitle(newName, threadID);
-      }
-
-      if (cmd === "/unlockgname") {
-        if (groupLocks[threadID]) delete groupLocks[threadID].groupNameLock;
-        saveGroupLocks();
-      }
-
-      if (cmd === "/nicklock") {
-        const sub = args[1];
-        if (sub === "on") {
-          const info = await api.getThreadInfo(threadID);
-          const nickObj = {};
-          for (const user of info.participantIDs) {
-            const nickname = info.nicknames[user] || "";
-            nickObj[user] = nickname;
-          }
-
-          groupLocks[threadID] = groupLocks[threadID] || {};
-          groupLocks[threadID].nicknameLock = nickObj;
-          saveGroupLocks();
-        } else if (sub === "off") {
-          if (groupLocks[threadID]) delete groupLocks[threadID].nicknameLock;
-          saveGroupLocks();
+      if (event.logMessageType === "log:thread-name" && lock?.groupName && event.author !== api.getCurrentUserID()) {
+        if (event.logMessageData?.name !== lock.groupName) {
+          console.log(`[${new Date().toLocaleTimeString()}] 🔒 Reverting GC name`);
+          await api.setTitle(lock.groupName, threadID).catch(() => {});
         }
       }
 
-      if (cmd === "/nickall") {
-        const data = groupLocks[threadID]?.nicknameLock;
-        if (!data) return;
+      if (event.logMessageType === "log:user-nickname" && lock?.nicknames && event.author !== api.getCurrentUserID()) {
+        const userID = event.logMessageData.participant_id;
+        const expectedNick = lock.nicknames[userID];
+        if (expectedNick && event.logMessageData.nickname !== expectedNick) {
+          console.log(`[${new Date().toLocaleTimeString()}] 🔒 Reverting nickname`);
+          if (!nickChangeCounter[threadID]) nickChangeCounter[threadID] = 0;
 
-        let count = 0;
-        for (const id in data) {
-          await api.changeNickname(data[id], threadID, id);
-          await delay(Math.random() * 1000 + 3000); // 3s–4s delay
+          await sleep(3000 + Math.random() * 1000);
+          await api.changeNickname(expectedNick, threadID, userID).catch(() => {});
+          nickChangeCounter[threadID]++;
 
-          count++;
-          if (count % 60 === 0) {
-            console.log("⏳ Cooldown after 60 nicknames");
-            await delay(180000); // 3-min cooldown
+          if (nickChangeCounter[threadID] >= 60) {
+            console.log("⏸️ Cooling down for 3 minutes...");
+            await sleep(3 * 60 * 1000);
+            nickChangeCounter[threadID] = 0;
           }
         }
       }
     }
   });
 
-  // Re-apply nicknames and group name every 45 sec
+  // Revert GC name every 45 seconds
   setInterval(async () => {
     for (const threadID in groupLocks) {
-      const data = groupLocks[threadID];
-
-      if (data.nicknameLock) {
+      const lock = groupLocks[threadID];
+      if (lock?.groupName) {
         const info = await api.getThreadInfo(threadID);
-        for (const id in data.nicknameLock) {
-          const currentNick = info.nicknames[id] || "";
-          if (currentNick !== data.nicknameLock[id]) {
-            api.changeNickname(data.nicknameLock[id], threadID, id);
-            await delay(Math.random() * 1000 + 3000); // 3–4s delay
-          }
-        }
-      }
-
-      if (data.groupNameLock) {
-        const info = await api.getThreadInfo(threadID);
-        if (info.threadName !== data.groupNameLock) {
-          api.setTitle(data.groupNameLock, threadID, err => {
-            if (err) console.error("Group name revert failed:", err);
-          });
+        if (info?.threadName !== lock.groupName) {
+          console.log(`[${new Date().toLocaleTimeString()}] 🔒 Reverting GC name`);
+          await api.setTitle(lock.groupName, threadID).catch(() => {});
         }
       }
     }
-  }, 45000); // Every 45 sec
+  }, 45 * 1000);
 });
+
+http.createServer((_, res) => {
+  res.end("Bot is running.");
+}).listen(10000);
