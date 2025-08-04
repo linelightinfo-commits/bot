@@ -1,113 +1,96 @@
 const login = require("ws3-fca");
 const fs = require("fs");
-const http = require("http");
 const path = require("path");
 
 const appstateFile = path.join(__dirname, "appstate.json");
 const groupDataFile = path.join(__dirname, "groupData.json");
-const allowedUID = "61578631626802";
 
-let api;
-let groupLocks = {};
-let nicknameChangeCount = 0;
-let lastCooldownTime = 0;
-
-// HTTP server to keep bot alive
-http.createServer((_, res) => res.end("Bot is running")).listen(10000);
-
-// Load saved data
+let groupData = {};
 if (fs.existsSync(groupDataFile)) {
-  groupLocks = JSON.parse(fs.readFileSync(groupDataFile, "utf-8"));
+  try {
+    groupData = JSON.parse(fs.readFileSync(groupDataFile, "utf8"));
+  } catch (e) {
+    console.error("❌ Error reading groupData.json:", e);
+  }
 }
 
-function saveGroupData() {
-  fs.writeFileSync(groupDataFile, JSON.stringify(groupLocks, null, 2));
-}
+const saveAppState = (appState) => {
+  fs.writeFileSync(appstateFile, JSON.stringify(appState, null, 2));
+  console.log(`[${new Date().toLocaleTimeString()}] 💾 Appstate backed up`);
+};
 
-// Appstate backup
-setInterval(() => {
-  fs.copyFileSync(appstateFile, "appstate.backup.json");
-}, 10 * 60 * 1000); // Every 10 min
+login({ appState: JSON.parse(fs.readFileSync(appstateFile, "utf8")) }, async (err, api) => {
+  if (err) return console.error("❌ Login error:", err);
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+  console.log(`✅ Logged in as: ${api.getCurrentUserID()}`);
 
-function isCooldownDue() {
-  return nicknameChangeCount >= 60 && (Date.now() - lastCooldownTime) > 3 * 60 * 1000;
-}
+  api.setOptions({
+    listenEvents: true,
+    selfListen: false,
+    updatePresence: true,
+    forceLogin: true,
+  });
 
-async function lockNicknames(threadID) {
-  const data = groupLocks[threadID];
-  if (!data || !data.nicknameLock || !data.nickname) return;
+  // Backup appstate every 10 minutes
+  setInterval(() => saveAppState(api.getAppState()), 10 * 60 * 1000);
 
-  const { nickname, nicknameTargets } = data;
+  // Anti-sleep: send typing every 5 minutes
+  setInterval(() => {
+    for (const threadID in groupData) {
+      api.sendTypingIndicator(threadID);
+    }
+  }, 5 * 60 * 1000);
 
-  api.getThreadInfo(threadID, async (err, info) => {
-    if (err || !info || !info.participantIDs) return;
-
-    const participants = info.participantIDs;
-
-    for (const uid of participants) {
-      const shouldLock = nicknameTargets === "all" || (Array.isArray(nicknameTargets) && nicknameTargets.includes(uid));
-      if (!shouldLock) continue;
-
-      await sleep(3000 + Math.random() * 1000);
-
-      api.changeNickname(nickname, threadID, uid, err => {
-        if (!err) {
-          console.log(`[${new Date().toLocaleTimeString()}] Nickname locked: ${uid} => "${nickname}"`);
-        }
-      });
-
-      nicknameChangeCount++;
-
-      if (nicknameChangeCount >= 60) {
-        console.log("🔄 Cooling down for 3 minutes...");
-        await sleep(3 * 60 * 1000);
-        nicknameChangeCount = 0;
-        lastCooldownTime = Date.now();
+  // Group name lock every 45 sec
+  setInterval(() => {
+    for (const threadID in groupData) {
+      const data = groupData[threadID];
+      if (data.groupNameLock && data.lockedGroupName) {
+        api.getThreadInfo(threadID, (err, info) => {
+          if (!err && info.threadName !== data.lockedGroupName) {
+            api.setTitle(data.lockedGroupName, threadID, () => {
+              console.log(`[${new Date().toLocaleTimeString()}] 🔁 Group name reverted in ${threadID}`);
+            });
+          }
+        });
       }
     }
-  });
-}
+  }, 45 * 1000);
 
-function lockGroupName(threadID) {
-  const data = groupLocks[threadID];
-  if (!data || !data.groupNameLock || !data.groupName) return;
+  // Nickname lock controller
+  let nicknameCount = 0;
+  const nicknameWorker = async () => {
+    for (const threadID in groupData) {
+      const data = groupData[threadID];
+      if (!data.nicknameLock || !data.lockedNicknames) continue;
 
-  api.getThreadInfo(threadID, (err, info) => {
-    if (err || !info) return;
+      for (const uid in data.lockedNicknames) {
+        const targetNick = data.lockedNicknames[uid];
+        try {
+          api.getThreadInfo(threadID, async (err, info) => {
+            if (err || !info || !info.nicknames) return;
 
-    if (info.threadName !== data.groupName) {
-      api.setTitle(data.groupName, threadID, err => {
-        if (!err) {
-          console.log(`[${new Date().toLocaleTimeString()}] Group name reverted to "${data.groupName}"`);
+            const currentNick = info.nicknames[uid];
+            if (currentNick !== targetNick) {
+              await api.setNickname(targetNick, threadID, uid);
+              nicknameCount++;
+              console.log(`[${new Date().toLocaleTimeString()}] 🔄 Nickname fixed for UID ${uid} in ${threadID}`);
+            }
+          });
+        } catch (e) {
+          console.error("❌ Nickname update error:", e.message);
         }
-      });
+
+        await new Promise((r) => setTimeout(r, Math.floor(Math.random() * 1000) + 3000)); // 3–4s delay
+
+        if (nicknameCount >= 60) {
+          console.log(`[${new Date().toLocaleTimeString()}] ⏸️ 3 min cooldown (60 nicknames done)`);
+          nicknameCount = 0;
+          await new Promise((r) => setTimeout(r, 3 * 60 * 1000));
+        }
+      }
     }
-  });
-}
-
-// Anti-sleep: Send typing every 5 min
-setInterval(() => {
-  for (const threadID in groupLocks) {
-    api.sendTypingIndicator(threadID);
-  }
-}, 5 * 60 * 1000);
-
-// Periodic checks
-setInterval(() => {
-  for (const threadID in groupLocks) {
-    lockGroupName(threadID);
-    lockNicknames(threadID);
-  }
-}, 45 * 1000);
-
-// Login
-login({ appState: JSON.parse(fs.readFileSync(appstateFile, "utf-8")) }, (err, apix) => {
-  if (err) return console.error("❌ Login failed:", err);
-
-  api = apix;
-  console.log(`✅ Logged in as: ${api.getCurrentUserID()}`);
+    setTimeout(nicknameWorker, 5000);
+  };
+  nicknameWorker();
 });
