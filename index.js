@@ -1,96 +1,134 @@
 const login = require("ws3-fca");
 const fs = require("fs");
-const path = require("path");
+const http = require("http");
 
-const appstateFile = path.join(__dirname, "appstate.json");
-const groupDataFile = path.join(__dirname, "groupData.json");
+const appstate = require("./appstate.json");
+const groupDataFile = "groupData.json";
 
-let groupData = {};
-if (fs.existsSync(groupDataFile)) {
-  try {
-    groupData = JSON.parse(fs.readFileSync(groupDataFile, "utf8"));
-  } catch (e) {
-    console.error("❌ Error reading groupData.json:", e);
-  }
+const ADMIN_UID = "61578631626802";
+const groupLocks = fs.existsSync(groupDataFile) ? JSON.parse(fs.readFileSync(groupDataFile)) : {};
+
+function saveLocks() {
+  fs.writeFileSync(groupDataFile, JSON.stringify(groupLocks, null, 2));
 }
 
-const saveAppState = (appState) => {
-  fs.writeFileSync(appstateFile, JSON.stringify(appState, null, 2));
-  console.log(`[${new Date().toLocaleTimeString()}] 💾 Appstate backed up`);
-};
-
-login({ appState: JSON.parse(fs.readFileSync(appstateFile, "utf8")) }, async (err, api) => {
-  if (err) return console.error("❌ Login error:", err);
+login({ appState: appstate }, (err, api) => {
+  if (err) return console.error("Login error:", err);
 
   console.log(`✅ Logged in as: ${api.getCurrentUserID()}`);
+  api.setOptions({ listenEvents: true, selfListen: false });
 
-  api.setOptions({
-    listenEvents: true,
-    selfListen: false,
-    updatePresence: true,
-    forceLogin: true,
-  });
+  // Silent HTTP server for render
+  http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("Bot is running!");
+  }).listen(10000);
 
-  // Backup appstate every 10 minutes
-  setInterval(() => saveAppState(api.getAppState()), 10 * 60 * 1000);
-
-  // Anti-sleep: send typing every 5 minutes
+  // --- Auto appstate backup ---
   setInterval(() => {
-    for (const threadID in groupData) {
-      api.sendTypingIndicator(threadID);
+    fs.writeFileSync("appstate.json", JSON.stringify(api.getAppState()));
+  }, 10 * 60 * 1000);
+
+  // --- Anti Sleep ---
+  setInterval(() => {
+    for (const groupID in groupLocks) {
+      api.sendTypingIndicator(groupID);
     }
   }, 5 * 60 * 1000);
 
-  // Group name lock every 45 sec
-  setInterval(() => {
-    for (const threadID in groupData) {
-      const data = groupData[threadID];
-      if (data.groupNameLock && data.lockedGroupName) {
-        api.getThreadInfo(threadID, (err, info) => {
-          if (!err && info.threadName !== data.lockedGroupName) {
-            api.setTitle(data.lockedGroupName, threadID, () => {
-              console.log(`[${new Date().toLocaleTimeString()}] 🔁 Group name reverted in ${threadID}`);
-            });
-          }
-        });
-      }
+  // --- Group name lock check ---
+  setInterval(async () => {
+    for (const groupID in groupLocks) {
+      const lock = groupLocks[groupID];
+      if (!lock.groupName) continue;
+      try {
+        const info = await api.getThreadInfo(groupID);
+        if (info.threadName !== lock.groupName) {
+          await api.setTitle(lock.groupName, groupID);
+          console.log(`[${new Date().toLocaleTimeString()}] ⛔ Group name reverted in ${groupID}`);
+        }
+      } catch (e) {}
     }
   }, 45 * 1000);
 
-  // Nickname lock controller
-  let nicknameCount = 0;
-  const nicknameWorker = async () => {
-    for (const threadID in groupData) {
-      const data = groupData[threadID];
-      if (!data.nicknameLock || !data.lockedNicknames) continue;
+  // --- Nickname lock logic ---
+  async function lockNicknames(threadID) {
+    const lock = groupLocks[threadID];
+    if (!lock || !lock.nicknames) return;
 
-      for (const uid in data.lockedNicknames) {
-        const targetNick = data.lockedNicknames[uid];
+    const info = await api.getThreadInfo(threadID);
+    let changeCount = 0;
+
+    for (const userID in lock.nicknames) {
+      const currentNick = info.nicknames[userID];
+      const targetNick = lock.nicknames[userID];
+      if (currentNick !== targetNick) {
+        await new Promise(res => setTimeout(res, 3000 + Math.random() * 1000));
         try {
-          api.getThreadInfo(threadID, async (err, info) => {
-            if (err || !info || !info.nicknames) return;
-
-            const currentNick = info.nicknames[uid];
-            if (currentNick !== targetNick) {
-              await api.setNickname(targetNick, threadID, uid);
-              nicknameCount++;
-              console.log(`[${new Date().toLocaleTimeString()}] 🔄 Nickname fixed for UID ${uid} in ${threadID}`);
-            }
-          });
-        } catch (e) {
-          console.error("❌ Nickname update error:", e.message);
-        }
-
-        await new Promise((r) => setTimeout(r, Math.floor(Math.random() * 1000) + 3000)); // 3–4s delay
-
-        if (nicknameCount >= 60) {
-          console.log(`[${new Date().toLocaleTimeString()}] ⏸️ 3 min cooldown (60 nicknames done)`);
-          nicknameCount = 0;
-          await new Promise((r) => setTimeout(r, 3 * 60 * 1000));
+          await api.changeNickname(targetNick, threadID, userID);
+          console.log(`[${new Date().toLocaleTimeString()}] 🔁 Nickname reverted for ${userID} in ${threadID}`);
+        } catch (e) {}
+        changeCount++;
+        if (changeCount % 60 === 0) {
+          await new Promise(r => setTimeout(r, 3 * 60 * 1000));
         }
       }
     }
-    setTimeout(nicknameWorker, 5000);
-  };
-  nicknameWorker();
+  }
+
+  api.listenMqtt(async (err, event) => {
+    if (err || !event.threadID) return;
+    const { threadID, body, senderID } = event;
+
+    if (!groupLocks[threadID]) groupLocks[threadID] = {};
+    const lock = groupLocks[threadID];
+
+    // Command Handling (Admin UID only)
+    if (senderID === ADMIN_UID && body) {
+      if (body.startsWith("/nicklock on")) {
+        const info = await api.getThreadInfo(threadID);
+        lock.nicknames = {};
+        for (const u of info.userInfo) {
+          lock.nicknames[u.id] = info.nicknames[u.id] || u.firstName;
+        }
+        saveLocks();
+        console.log(`[${new Date().toLocaleTimeString()}] 🔒 Nickname lock enabled in ${threadID}`);
+      }
+
+      if (body.startsWith("/nicklock off")) {
+        delete lock.nicknames;
+        saveLocks();
+        console.log(`[${new Date().toLocaleTimeString()}] 🔓 Nickname lock disabled in ${threadID}`);
+      }
+
+      if (body.startsWith("/gclock ")) {
+        const name = body.slice(8).trim();
+        lock.groupName = name;
+        saveLocks();
+        api.setTitle(name, threadID);
+        console.log(`[${new Date().toLocaleTimeString()}] 🔒 Group name locked: ${name}`);
+      }
+
+      if (body.startsWith("/unlockgname")) {
+        delete lock.groupName;
+        saveLocks();
+        console.log(`[${new Date().toLocaleTimeString()}] 🔓 Group name unlock in ${threadID}`);
+      }
+
+      if (body.startsWith("/nickall ")) {
+        const nickname = body.slice(9).trim();
+        const info = await api.getThreadInfo(threadID);
+        for (const u of info.userInfo) {
+          await new Promise(r => setTimeout(r, 3000 + Math.random() * 1000));
+          try {
+            await api.changeNickname(nickname, threadID, u.id);
+          } catch (e) {}
+        }
+        console.log(`[${new Date().toLocaleTimeString()}] 🔁 All nicknames changed in ${threadID}`);
+      }
+    }
+
+    // Enforce nickname lock
+    if (lock.nicknames) lockNicknames(threadID);
+  });
 });
