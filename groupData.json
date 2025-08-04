@@ -1,8 +1,19 @@
 {
   "24137017955931168": {
-    "gclock": true,
-    "groupName": "Zalimon ka Adda 😈",
-    "nicklock": true,
-    "nick": "😈 Zalim Boy 😈"
+    "nicknameLock": true,
+    "groupNameLock": true,
+    "lockedGroupName": "🔥 Zalim Group 🔥",
+    "lockedNicknames": {
+      "ALL": "😈 Zalim 😈"
+    }
+  },
+  "6": {
+    "nicknameLock": true,
+    "groupNameLock": true,
+    "lockedGroupName": "👑 Royal Adda 👑",
+    "lockedNicknames": {
+      "1000111222333444": "🔥 Boss 🔥",
+      "1000999888777666": "😎 Don 😎"
+    }
   }
 }
