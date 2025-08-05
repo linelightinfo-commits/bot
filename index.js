@@ -15,14 +15,16 @@ const appStatePath = path.join(process.env.DATA_DIR || __dirname, "appstate.json
 const dataFile = path.join(process.env.DATA_DIR || __dirname, "groupData.json");
 
 const GROUP_NAME_CHECK_INTERVAL = parseInt(process.env.GROUP_NAME_CHECK_INTERVAL) || 45 * 1000; // 45 seconds
-const NICKNAME_DELAY_MIN = parseInt(process.env.NICKNAME_DELAY_MIN) || 4000; // 4 seconds
-const NICKNAME_DELAY_MAX = parseInt(process.env.NICKNAME_DELAY_MAX) || 5000; // 5 seconds
+const NICKNAME_DELAY_MIN = parseInt(process.env.NICKNAME_DELAY_MIN) || 5000; // 5 seconds
+const NICKNAME_DELAY_MAX = parseInt(process.env.NICKNAME_DELAY_MAX) || 6000; // 6 seconds
 const NICKNAME_CHANGE_LIMIT = parseInt(process.env.NICKNAME_CHANGE_LIMIT) || 60; // 60 members
 const NICKNAME_COOLDOWN = parseInt(process.env.NICKNAME_COOLDOWN) || 180000; // 3 minutes
 const TYPING_INTERVAL = parseInt(process.env.TYPING_INTERVAL) || 300000; // 5 minutes
 const APPSTATE_BACKUP_INTERVAL = parseInt(process.env.APPSTATE_BACKUP_INTERVAL) || 600000; // 10 minutes
 
 let groupLocks = {};
+let nicknameQueue = []; // Queue for nickname changes
+
 async function loadLocks() {
   try {
     if (await fs.access(dataFile).then(() => true).catch(() => false)) {
@@ -57,6 +59,39 @@ function timestamp() {
   return new Date().toTimeString().split(" ")[0];
 }
 
+// Queue-based nickname change processor
+async function processNicknameQueue(api) {
+  while (nicknameQueue.length > 0) {
+    const { threadID, userID, nickname } = nicknameQueue[0];
+    const group = groupLocks[threadID];
+    if (!group || group.cooldown) {
+      nicknameQueue.shift();
+      continue;
+    }
+
+    try {
+      await new Promise((resolve, reject) => {
+        api.changeNickname(nickname, threadID, userID, (err) => (err ? reject(err) : resolve()));
+      });
+      group.count++;
+      console.log(`[${timestamp()}] [NICKLOCK] Reverted nickname for ${userID} in ${threadID}`);
+      if (group.count >= NICKNAME_CHANGE_LIMIT) {
+        console.log(`[${timestamp()}] [COOLDOWN] Triggered for ${threadID}`);
+        group.cooldown = true;
+        setTimeout(() => {
+          group.cooldown = false;
+          group.count = 0;
+          console.log(`[${timestamp()}] [COOLDOWN] Lifted for ${threadID}`);
+        }, NICKNAME_COOLDOWN);
+      }
+    } catch (e) {
+      console.warn(`[${timestamp()}] ❌ Nick revert error for ${userID} in ${threadID}:`, e?.message || e);
+    }
+    nicknameQueue.shift();
+    await delay(randomDelay());
+  }
+}
+
 async function main() {
   // Load appstate
   let appState;
@@ -84,6 +119,9 @@ async function main() {
   }
 
   await loadLocks();
+
+  // Start nickname queue processor
+  setInterval(() => processNicknameQueue(api), 1000);
 
   // Group name lock loop
   setInterval(async () => {
@@ -154,14 +192,7 @@ async function main() {
           };
           for (const user of info.userInfo) {
             groupLocks[threadID].original[user.id] = lockedNick;
-            try {
-              await new Promise((resolve, reject) => {
-                api.changeNickname(lockedNick, threadID, user.id, (err) => (err ? reject(err) : resolve()));
-              });
-              await delay(randomDelay());
-            } catch (e) {
-              console.warn(`[${timestamp()}] ❌ Nicklock set error for user ${user.id} in ${threadID}:`, e?.message || e);
-            }
+            nicknameQueue.push({ threadID, userID: user.id, nickname: lockedNick });
           }
           await saveLocks();
           console.log(`[${timestamp()}] [NICKLOCK] Activated for ${threadID}`);
@@ -186,17 +217,10 @@ async function main() {
           for (const user of info.userInfo) {
             const nick = data.nick;
             groupLocks[threadID].original[user.id] = nick;
-            try {
-              await new Promise((resolve, reject) => {
-                api.changeNickname(nick, threadID, user.id, (err) => (err ? reject(err) : resolve()));
-              });
-              await delay(randomDelay());
-            } catch (e) {
-              console.warn(`[${timestamp()}] ❌ Nickall set error for user ${user.id} in ${threadID}:`, e?.message || e);
-            }
+            nicknameQueue.push({ threadID, userID: user.id, nickname: nick });
           }
           await saveLocks();
-          console.log(`[${timestamp()}] [REAPPLY] Nicknames reapplied for ${threadID}`);
+          console.log(`[${timestamp()}] [REAPPLY] Nicknames queued for ${threadID}`);
         } catch (e) {
           console.error(`[${timestamp()}] ❌ Nickall error:`, e);
         }
@@ -250,26 +274,8 @@ async function main() {
       const lockedNick = group.original[uid];
 
       if (lockedNick && currentNick !== lockedNick) {
-        try {
-          await new Promise((resolve, reject) => {
-            api.changeNickname(lockedNick, threadID, uid, (err) => (err ? reject(err) : resolve()));
-          });
-          group.count++;
-          console.log(`[${timestamp()}] [NICKLOCK] Reverted nickname for ${uid} in ${threadID}`);
-          if (group.count >= NICKNAME_CHANGE_LIMIT) {
-            console.log(`[${timestamp()}] [COOLDOWN] Triggered for ${threadID}`);
-            group.cooldown = true;
-            setTimeout(() => {
-              group.cooldown = false;
-              group.count = 0;
-              console.log(`[${timestamp()}] [COOLDOWN] Lifted for ${threadID}`);
-            }, NICKNAME_COOLDOWN);
-          } else {
-            await delay(randomDelay());
-          }
-        } catch (e) {
-          console.warn(`[${timestamp()}] ❌ Nick revert error for ${uid} in ${threadID}:`, e?.message || e);
-        }
+        nicknameQueue.push({ threadID, userID: uid, nickname: lockedNick });
+        console.log(`[${timestamp()}] [NICKLOCK] Queued nickname revert for ${uid} in ${threadID}`);
       }
     }
   });
