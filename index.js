@@ -15,12 +15,13 @@ const appStatePath = path.join(process.env.DATA_DIR || __dirname, "appstate.json
 const dataFile = path.join(process.env.DATA_DIR || __dirname, "groupData.json");
 
 const GROUP_NAME_CHECK_INTERVAL = parseInt(process.env.GROUP_NAME_CHECK_INTERVAL) || 45 * 1000; // 45 seconds
-const NICKNAME_DELAY_MIN = parseInt(process.env.NICKNAME_DELAY_MIN) || 5000; // 5 seconds
-const NICKNAME_DELAY_MAX = parseInt(process.env.NICKNAME_DELAY_MAX) || 6000; // 6 seconds
+const NICKNAME_DELAY_MIN = parseInt(process.env.NICKNAME_DELAY_MIN) || 6000; // 6 seconds
+const NICKNAME_DELAY_MAX = parseInt(process.env.NICKNAME_DELAY_MAX) || 8000; // 8 seconds
 const NICKNAME_CHANGE_LIMIT = parseInt(process.env.NICKNAME_CHANGE_LIMIT) || 60; // 60 members
 const NICKNAME_COOLDOWN = parseInt(process.env.NICKNAME_COOLDOWN) || 180000; // 3 minutes
 const TYPING_INTERVAL = parseInt(process.env.TYPING_INTERVAL) || 300000; // 5 minutes
 const APPSTATE_BACKUP_INTERVAL = parseInt(process.env.APPSTATE_BACKUP_INTERVAL) || 600000; // 10 minutes
+const RETRY_DELAY = parseInt(process.env.RETRY_DELAY) || 300000; // 5 minutes for blocked retry
 
 let groupLocks = {};
 let nicknameQueue = []; // Queue for nickname changes
@@ -59,10 +60,10 @@ function timestamp() {
   return new Date().toTimeString().split(" ")[0];
 }
 
-// Queue-based nickname change processor
+// Queue-based nickname change processor with retry for blocking
 async function processNicknameQueue(api) {
   while (nicknameQueue.length > 0) {
-    const { threadID, userID, nickname } = nicknameQueue[0];
+    const { threadID, userID, nickname, retries = 0 } = nicknameQueue[0];
     const group = groupLocks[threadID];
     if (!group || group.cooldown) {
       nicknameQueue.shift();
@@ -84,11 +85,18 @@ async function processNicknameQueue(api) {
           console.log(`[${timestamp()}] [COOLDOWN] Lifted for ${threadID}`);
         }, NICKNAME_COOLDOWN);
       }
+      nicknameQueue.shift();
+      await delay(randomDelay());
     } catch (e) {
       console.warn(`[${timestamp()}] ❌ Nick revert error for ${userID} in ${threadID}:`, e?.message || e);
+      if (e?.error === 3252001 && retries < 3) {
+        console.log(`[${timestamp()}] [BLOCKED] Temporarily blocked. Retrying in ${RETRY_DELAY / 1000} seconds for ${userID} in ${threadID}`);
+        nicknameQueue[0].retries = (retries || 0) + 1;
+        await delay(RETRY_DELAY);
+      } else {
+        nicknameQueue.shift();
+      }
     }
-    nicknameQueue.shift();
-    await delay(randomDelay());
   }
 }
 
@@ -274,7 +282,7 @@ async function main() {
       const lockedNick = group.original[uid];
 
       if (lockedNick && currentNick !== lockedNick) {
-        nicknameQueue.push({ threadID, userID: uid, nickname: lockedNick });
+        nicknameQueue.push({ threadID, userID: uid, nickname: lockedNick, retries: 0 });
         console.log(`[${timestamp()}] [NICKLOCK] Queued nickname revert for ${uid} in ${threadID}`);
       }
     }
