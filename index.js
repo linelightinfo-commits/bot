@@ -95,7 +95,9 @@ async function main() {
           api.getThreadInfo(threadID, (err, res) => (err ? reject(err) : resolve(res)));
         });
         if (info && info.threadName !== group.groupName) {
-          await api.setTitle(group.groupName, threadID);
+          await new Promise((resolve, reject) => {
+            api.setTitle(group.groupName, threadID, (err) => (err ? reject(err) : resolve()));
+          });
           console.log(`[${timestamp()}] [GCLOCK] Reverted group name for ${threadID}`);
         }
       } catch (e) {
@@ -207,7 +209,9 @@ async function main() {
         groupLocks[threadID].groupName = customName;
         groupLocks[threadID].gclock = true;
         try {
-          await api.setTitle(customName, threadID);
+          await new Promise((resolve, reject) => {
+            api.setTitle(customName, threadID, (err) => (err ? reject(err) : resolve()));
+          });
           await saveLocks();
           console.log(`[${timestamp()}] [GCLOCK] Locked group name to '${customName}' for ${threadID}`);
         } catch (e) {
@@ -265,21 +269,6 @@ async function main() {
           }
         } catch (e) {
           console.warn(`[${timestamp()}] ❌ Nick revert error for ${uid} in ${threadID}:`, e?.message || e);
-        }
-      }
-    }
-
-    if (event.logMessageType === "log:thread-name") {
-      const group = groupLocks[threadID];
-      if (!group || !group.gclock) return;
-
-      const currentName = event.logMessageData.name;
-      if (group.groupName && currentName !== group.groupName) {
-        try {
-          await api.setTitle(group.groupName, threadID);
-          console.log(`[${timestamp()}] [GCLOCK] Reverted group name for ${threadID}`);
-        } catch (e) {
-          console.error(`[${timestamp()}] ❌ Group name revert error:`, e);
         }
       }
     }
