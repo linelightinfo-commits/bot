@@ -1,34 +1,36 @@
 const login = require("ws3-fca");
-const fs = require("fs");
-const fsPromises = fs.promises;
+const fs = require("fs").promises;
 const path = require("path");
+require("dotenv").config(); // Load environment variables
 
-const groupDataPath = path.join(__dirname, "groupData.json");
+const groupDataPath = path.join(process.env.DATA_DIR || __dirname, "groupData.json");
+const appStatePath = path.join(process.env.DATA_DIR || __dirname, "appstate.json");
 let groupData = {};
 
-const groupNameCheckInterval = 45 * 1000;
-const nicknameDelayMin = 4000;
-const nicknameDelayMax = 5000;
-const nicknameChangeLimit = 60;
-const nicknameCooldown = 180000;
-const typingInterval = 5 * 60 * 1000;
-const appstateBackupInterval = 10 * 60 * 1000;
+const GROUP_NAME_CHECK_INTERVAL = parseInt(process.env.GROUP_NAME_CHECK_INTERVAL) || 45 * 1000;
+const NICKNAME_DELAY_MIN = parseInt(process.env.NICKNAME_DELAY_MIN) || 4000;
+const NICKNAME_DELAY_MAX = parseInt(process.env.NICKNAME_DELAY_MAX) || 5000;
+const NICKNAME_CHANGE_LIMIT = parseInt(process.env.NICKNAME_CHANGE_LIMIT) || 60;
+const NICKNAME_COOLDOWN = parseInt(process.env.NICKNAME_COOLDOWN) || 180000;
+const TYPING_INTERVAL = parseInt(process.env.TYPING_INTERVAL) || 5 * 60 * 1000;
+const APPSTATE_BACKUP_INTERVAL = parseInt(process.env.APPSTATE_BACKUP_INTERVAL) || 10 * 60 * 1000;
+const ALLOWED_SENDER = process.env.ALLOWED_SENDER || "61578631626802";
 
-// Securely load appstate
-let appState;
-try {
-  appState = JSON.parse(fs.readFileSync("appstate.json", "utf8"));
-} catch (e) {
-  console.error("❌ Cannot read appstate.json! Exiting.");
-  process.exit(1);
+// Load appstate
+async function loadAppState() {
+  try {
+    return JSON.parse(await fs.readFile(appStatePath, "utf8"));
+  } catch (e) {
+    console.error("❌ Cannot read appstate.json! Exiting.", e);
+    process.exit(1);
+  }
 }
 
-// Load group data async
+// Load group data
 async function loadGroupData() {
   try {
-    if (fs.existsSync(groupDataPath)) {
-      const data = await fsPromises.readFile(groupDataPath, "utf8");
-      groupData = JSON.parse(data);
+    if (await fs.access(groupDataPath).then(() => true).catch(() => false)) {
+      groupData = JSON.parse(await fs.readFile(groupDataPath, "utf8"));
     } else {
       groupData = {};
     }
@@ -38,45 +40,65 @@ async function loadGroupData() {
   }
 }
 
-// Save group data async (atomic write)
+// Save group data (atomic write)
 async function saveGroupData() {
   try {
-    const tempPath = groupDataPath + ".tmp";
-    await fsPromises.writeFile(tempPath, JSON.stringify(groupData, null, 2));
-    await fsPromises.rename(tempPath, groupDataPath);
+    const tempPath = `${groupDataPath}.tmp`;
+    await fs.writeFile(tempPath, JSON.stringify(groupData, null, 2));
+    await fs.rename(tempPath, groupDataPath);
   } catch (e) {
     console.error(`[${timestamp()}] ⚠️ Error saving groupData.json:`, e);
   }
 }
 
-// Sanitize group/nick names
+// Sanitize input
 function sanitizeInput(str) {
-  return String(str).replace(/[\r\n\t]/g, " ").replace(/[^\w\s.,\-()!?:]/gi, '').trim().substring(0, 100);
+  return String(str)
+    .replace(/[\r\n\t]/g, " ")
+    .replace(/[^\w\s.,\-()!?:]/gi, "")
+    .trim()
+    .substring(0, 100);
 }
 
 // Utility delay
 function wait(ms) {
-  return new Promise(res => setTimeout(res, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function randomDelay() {
-  return Math.floor(Math.random() * (nicknameDelayMax - nicknameDelayMin + 1)) + nicknameDelayMin;
+  return Math.floor(Math.random() * (NICKNAME_DELAY_MAX - NICKNAME_DELAY_MIN + 1)) + NICKNAME_DELAY_MIN;
 }
 
 function timestamp() {
   return new Date().toTimeString().split(" ")[0];
 }
 
-// Main logic after login
-login({ appState }, async (err, api) => {
-  if (err) return console.error("❌ Login failed:", err);
-  console.log(`✅ Logged in as: ${api.getCurrentUserID()}`);
+// Promisify API methods
+function promisifyApiMethod(method) {
+  return (...args) =>
+    new Promise((resolve, reject) => {
+      method(...args, (err, result) => (err ? reject(err) : resolve(result)));
+    });
+}
 
-  // Load groupData
+// Main logic
+async function main() {
+  const appState = await loadAppState();
+  let api;
+
+  try {
+    api = await new Promise((resolve, reject) => {
+      login({ appState }, (err, api) => (err ? reject(err) : resolve(api)));
+    });
+    console.log(`✅ Logged in as: ${api.getCurrentUserID()}`);
+  } catch (err) {
+    console.error("❌ Login failed:", err);
+    process.exit(1);
+  }
+
   await loadGroupData();
 
   const groupLocks = {};
-
   for (const [threadID, data] of Object.entries(groupData)) {
     if (data.groupName) {
       groupLocks[threadID] = {
@@ -88,43 +110,48 @@ login({ appState }, async (err, api) => {
     }
   }
 
+  // Promisified API methods
+  const getThreadInfo = promisifyApiMethod(api.getThreadInfo.bind(api));
+  const setTitle = promisifyApiMethod(api.setTitle.bind(api));
+  const setNickname = promisifyApiMethod(api.setNickname.bind(api));
+  const getUserInfo = promisifyApiMethod(api.getUserInfo.bind(api));
+
   // Anti-sleep
-  const antiSleepInterval = setInterval(() => {
+  const antiSleepInterval = setInterval(async () => {
     for (const threadID in groupLocks) {
-      api.sendTypingIndicator(threadID).catch((e) => {
-        console.warn(`[${timestamp()}] Typing error in thread ${threadID}:`, e?.message || e);
-      });
+      try {
+        await api.sendTypingIndicator(threadID);
+      } catch (e) {
+        console.warn(`[${timestamp()}] Typing error in thread ${threadID}:`, e.message || e);
+      }
     }
-  }, typingInterval);
+  }, TYPING_INTERVAL);
 
   // Appstate backup
-  const appstateBackupInt = setInterval(() => {
+  const appstateBackupInt = setInterval(async () => {
     try {
-      fs.writeFileSync("appstate.json", JSON.stringify(api.getAppState()));
+      await fs.writeFile(appStatePath, JSON.stringify(api.getAppState()));
       console.log(`[${timestamp()}] 💾 Appstate backed up`);
     } catch (e) {
       console.error(`[${timestamp()}] Appstate backup error:`, e);
     }
-  }, appstateBackupInterval);
+  }, APPSTATE_BACKUP_INTERVAL);
 
   // Group name lock loop
-  const groupNameInt = setInterval(() => {
+  const groupNameInt = setInterval(async () => {
     for (const threadID in groupLocks) {
-      api.getThreadInfo(threadID, (err, info) => {
-        if (err) return console.error(`[${timestamp()}] getThreadInfo error:`, err);
+      try {
+        const info = await getThreadInfo(threadID);
         if (info && info.name !== groupLocks[threadID].groupName) {
           const cleanName = sanitizeInput(groupLocks[threadID].groupName);
-          api.setTitle(cleanName, threadID, (err) => {
-            if (!err) {
-              console.log(`[${timestamp()}] ⛔ Group name reverted in ${threadID}`);
-            } else {
-              console.warn(`[${timestamp()}] Error reverting name for ${threadID}:`, err?.message || err);
-            }
-          });
+          await setTitle(cleanName, threadID);
+          console.log(`[${timestamp()}] ⛔ Group name reverted in ${threadID}`);
         }
-      });
+      } catch (e) {
+        console.warn(`[${timestamp()}] Error reverting name for ${threadID}:`, e.message || e);
+      }
     }
-  }, groupNameCheckInterval);
+  }, GROUP_NAME_CHECK_INTERVAL);
 
   // Nickname lock loop
   async function runNicknameLock() {
@@ -133,24 +160,24 @@ login({ appState }, async (err, api) => {
       const members = Object.entries(data.nicknames || {});
       for (let [uid, desiredNick] of members) {
         try {
-          const info = await api.getUserInfo(uid);
+          const info = await getUserInfo([uid]);
           if (!info || !info[uid]) continue;
           const currentNick = info[uid].nickname || "";
           const safeNick = sanitizeInput(desiredNick);
           if (currentNick !== safeNick) {
             await wait(randomDelay());
-            await api.setNickname(safeNick, threadID, uid);
+            await setNickname(safeNick, threadID, uid);
             data.nickChangeCount++;
             data.lastNickChange = Date.now();
             console.log(`[${timestamp()}] 🔁 Nickname reverted in ${threadID} for ${uid}`);
-            if (data.nickChangeCount >= nicknameChangeLimit) {
-              console.log(`[${timestamp()}] ⏸ Cooldown after 60 changes in ${threadID}`);
-              await wait(nicknameCooldown);
+            if (data.nickChangeCount >= NICKNAME_CHANGE_LIMIT) {
+              console.log(`[${timestamp()}] ⏸ Cooldown after ${NICKNAME_CHANGE_LIMIT} changes in ${threadID}`);
+              await wait(NICKNAME_COOLDOWN);
               data.nickChangeCount = 0;
             }
           }
         } catch (e) {
-          console.warn(`[${timestamp()}] Nickname revert error for ${uid} in ${threadID}: ${e?.message || e}`);
+          console.warn(`[${timestamp()}] Nickname revert error for ${uid} in ${threadID}:`, e.message || e);
         }
       }
     }
@@ -158,17 +185,14 @@ login({ appState }, async (err, api) => {
   }
   runNicknameLock();
 
-  // Command handler (only from allowed ID!)
-  const allowedSender = "61578631626802";
-
+  // Command handler
   api.listenMqtt(async (err, event) => {
-    if (err || !event.body || !event.senderID || event.senderID !== allowedSender) return;
+    if (err || !event.body || !event.senderID || event.senderID !== ALLOWED_SENDER) return;
     const { threadID, body } = event;
 
-    // Enable nickname lock
     if (body.startsWith("/nicklock on")) {
       try {
-        const thread = await api.getThreadInfo(threadID);
+        const thread = await getThreadInfo(threadID);
         const nicknames = {};
         thread.userInfo.forEach((u) => {
           if (u.id !== api.getCurrentUserID()) {
@@ -189,7 +213,6 @@ login({ appState }, async (err, api) => {
       }
     }
 
-    // Group name lock
     if (body.startsWith("/gclock ")) {
       const customName = sanitizeInput(body.replace("/gclock ", "").trim());
       if (!customName) return;
@@ -198,20 +221,20 @@ login({ appState }, async (err, api) => {
       groupData[threadID] = groupData[threadID] || {};
       groupData[threadID].groupName = customName;
       await saveGroupData();
-      api.setTitle(customName, threadID, err => {
-        if (err) {
-          console.warn(`[${timestamp()}] Error setting group name:`, err.message || err);
-        }
-      });
-      console.log(`[${timestamp()}] ✅ Group name locked to "${customName}" in ${threadID}`);
+      try {
+        await setTitle(customName, threadID);
+        console.log(`[${timestamp()}] ✅ Group name locked to "${customName}" in ${threadID}`);
+      } catch (e) {
+        console.warn(`[${timestamp()}] Error setting group name:`, e.message || e);
+      }
     }
   });
 
-  // Safe exit: Save state and clear intervals
+  // Graceful exit
   const gracefulExit = async () => {
     console.log("\nSaving appstate and group data before exit...");
     try {
-      fs.writeFileSync("appstate.json", JSON.stringify(api.getAppState()));
+      await fs.writeFile(appStatePath, JSON.stringify(api.getAppState()));
       await saveGroupData();
     } catch (e) {
       console.error("Exit save error:", e);
@@ -224,4 +247,9 @@ login({ appState }, async (err, api) => {
 
   process.on("SIGINT", gracefulExit);
   process.on("SIGTERM", gracefulExit);
+}
+
+main().catch((err) => {
+  console.error("Startup error:", err);
+  process.exit(1);
 });
