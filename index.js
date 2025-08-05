@@ -1,20 +1,22 @@
 const login = require("ws3-fca");
 const fs = require("fs").promises;
 const path = require("path");
-require("dotenv").config(); // Load environment variables
+require("dotenv").config(); // Add dotenv for environment variables
 
+// File paths using environment variable
 const groupDataPath = path.join(process.env.DATA_DIR || __dirname, "groupData.json");
 const appStatePath = path.join(process.env.DATA_DIR || __dirname, "appstate.json");
 let groupData = {};
 
-const GROUP_NAME_CHECK_INTERVAL = parseInt(process.env.GROUP_NAME_CHECK_INTERVAL) || 45 * 1000;
-const NICKNAME_DELAY_MIN = parseInt(process.env.NICKNAME_DELAY_MIN) || 4000;
-const NICKNAME_DELAY_MAX = parseInt(process.env.NICKNAME_DELAY_MAX) || 5000;
-const NICKNAME_CHANGE_LIMIT = parseInt(process.env.NICKNAME_CHANGE_LIMIT) || 60;
-const NICKNAME_COOLDOWN = parseInt(process.env.NICKNAME_COOLDOWN) || 180000;
-const TYPING_INTERVAL = parseInt(process.env.TYPING_INTERVAL) || 5 * 60 * 1000;
-const APPSTATE_BACKUP_INTERVAL = parseInt(process.env.APPSTATE_BACKUP_INTERVAL) || 10 * 60 * 1000;
-const ALLOWED_SENDER = process.env.ALLOWED_SENDER || "61578631626802";
+// Configurable intervals via environment variables
+const groupNameCheckInterval = parseInt(process.env.GROUP_NAME_CHECK_INTERVAL) || 45 * 1000;
+const nicknameDelayMin = parseInt(process.env.NICKNAME_DELAY_MIN) || 4000;
+const nicknameDelayMax = parseInt(process.env.NICKNAME_DELAY_MAX) || 5000;
+const nicknameChangeLimit = parseInt(process.env.NICKNAME_CHANGE_LIMIT) || 60;
+const nicknameCooldown = parseInt(process.env.NICKNAME_COOLDOWN) || 180000;
+const typingInterval = parseInt(process.env.TYPING_INTERVAL) || 5 * 60 * 1000;
+const appstateBackupInterval = parseInt(process.env.APPSTATE_BACKUP_INTERVAL) || 10 * 60 * 1000;
+const allowedSender = process.env.ALLOWED_SENDER || "61578631626802";
 
 // Load appstate
 async function loadAppState() {
@@ -66,19 +68,11 @@ function wait(ms) {
 }
 
 function randomDelay() {
-  return Math.floor(Math.random() * (NICKNAME_DELAY_MAX - NICKNAME_DELAY_MIN + 1)) + NICKNAME_DELAY_MIN;
+  return Math.floor(Math.random() * (nicknameDelayMax - nicknameDelayMin + 1)) + nicknameDelayMin;
 }
 
 function timestamp() {
   return new Date().toTimeString().split(" ")[0];
-}
-
-// Promisify API methods
-function promisifyApiMethod(method) {
-  return (...args) =>
-    new Promise((resolve, reject) => {
-      method(...args, (err, result) => (err ? reject(err) : resolve(result)));
-    });
 }
 
 // Main logic
@@ -110,22 +104,14 @@ async function main() {
     }
   }
 
-  // Promisified API methods
-  const getThreadInfo = promisifyApiMethod(api.getThreadInfo.bind(api));
-  const setTitle = promisifyApiMethod(api.setTitle.bind(api));
-  const setNickname = promisifyApiMethod(api.setNickname.bind(api));
-  const getUserInfo = promisifyApiMethod(api.getUserInfo.bind(api));
-
   // Anti-sleep
-  const antiSleepInterval = setInterval(async () => {
+  const antiSleepInterval = setInterval(() => {
     for (const threadID in groupLocks) {
-      try {
-        await api.sendTypingIndicator(threadID);
-      } catch (e) {
-        console.warn(`[${timestamp()}] Typing error in thread ${threadID}:`, e.message || e);
-      }
+      api.sendTypingIndicator(threadID).catch((e) => {
+        console.warn(`[${timestamp()}] Typing error in thread ${threadID}:`, e?.message || e);
+      });
     }
-  }, TYPING_INTERVAL);
+  }, typingInterval);
 
   // Appstate backup
   const appstateBackupInt = setInterval(async () => {
@@ -135,23 +121,26 @@ async function main() {
     } catch (e) {
       console.error(`[${timestamp()}] Appstate backup error:`, e);
     }
-  }, APPSTATE_BACKUP_INTERVAL);
+  }, appstateBackupInterval);
 
   // Group name lock loop
-  const groupNameInt = setInterval(async () => {
+  const groupNameInt = setInterval(() => {
     for (const threadID in groupLocks) {
-      try {
-        const info = await getThreadInfo(threadID);
+      api.getThreadInfo(threadID, (err, info) => {
+        if (err) return console.error(`[${timestamp()}] getThreadInfo error:`, err);
         if (info && info.name !== groupLocks[threadID].groupName) {
           const cleanName = sanitizeInput(groupLocks[threadID].groupName);
-          await setTitle(cleanName, threadID);
-          console.log(`[${timestamp()}] ⛔ Group name reverted in ${threadID}`);
+          api.setTitle(cleanName, threadID, (err) => {
+            if (!err) {
+              console.log(`[${timestamp()}] ⛔ Group name reverted in ${threadID}`);
+            } else {
+              console.warn(`[${timestamp()}] Error reverting name for ${threadID}:`, err?.message || err);
+            }
+          });
         }
-      } catch (e) {
-        console.warn(`[${timestamp()}] Error reverting name for ${threadID}:`, e.message || e);
-      }
+      });
     }
-  }, GROUP_NAME_CHECK_INTERVAL);
+  }, groupNameCheckInterval);
 
   // Nickname lock loop
   async function runNicknameLock() {
@@ -160,24 +149,28 @@ async function main() {
       const members = Object.entries(data.nicknames || {});
       for (let [uid, desiredNick] of members) {
         try {
-          const info = await getUserInfo([uid]);
+          const info = await new Promise((resolve, reject) => {
+            api.getUserInfo([uid], (err, res) => (err ? reject(err) : resolve(res)));
+          });
           if (!info || !info[uid]) continue;
           const currentNick = info[uid].nickname || "";
           const safeNick = sanitizeInput(desiredNick);
           if (currentNick !== safeNick) {
             await wait(randomDelay());
-            await setNickname(safeNick, threadID, uid);
+            await new Promise((resolve, reject) => {
+              api.setNickname(safeNick, threadID, uid, (err) => (err ? reject(err) : resolve()));
+            });
             data.nickChangeCount++;
             data.lastNickChange = Date.now();
             console.log(`[${timestamp()}] 🔁 Nickname reverted in ${threadID} for ${uid}`);
-            if (data.nickChangeCount >= NICKNAME_CHANGE_LIMIT) {
-              console.log(`[${timestamp()}] ⏸ Cooldown after ${NICKNAME_CHANGE_LIMIT} changes in ${threadID}`);
-              await wait(NICKNAME_COOLDOWN);
+            if (data.nickChangeCount >= nicknameChangeLimit) {
+              console.log(`[${timestamp()}] ⏸ Cooldown after ${nicknameChangeLimit} changes in ${threadID}`);
+              await wait(nicknameCooldown);
               data.nickChangeCount = 0;
             }
           }
         } catch (e) {
-          console.warn(`[${timestamp()}] Nickname revert error for ${uid} in ${threadID}:`, e.message || e);
+          console.warn(`[${timestamp()}] Nickname revert error for ${uid} in ${threadID}:`, e?.message || e);
         }
       }
     }
@@ -187,12 +180,14 @@ async function main() {
 
   // Command handler
   api.listenMqtt(async (err, event) => {
-    if (err || !event.body || !event.senderID || event.senderID !== ALLOWED_SENDER) return;
+    if (err || !event.body || !event.senderID || event.senderID !== allowedSender) return;
     const { threadID, body } = event;
 
     if (body.startsWith("/nicklock on")) {
       try {
-        const thread = await getThreadInfo(threadID);
+        const thread = await new Promise((resolve, reject) => {
+          api.getThreadInfo(threadID, (err, res) => (err ? reject(err) : resolve(res)));
+        });
         const nicknames = {};
         thread.userInfo.forEach((u) => {
           if (u.id !== api.getCurrentUserID()) {
@@ -221,12 +216,13 @@ async function main() {
       groupData[threadID] = groupData[threadID] || {};
       groupData[threadID].groupName = customName;
       await saveGroupData();
-      try {
-        await setTitle(customName, threadID);
-        console.log(`[${timestamp()}] ✅ Group name locked to "${customName}" in ${threadID}`);
-      } catch (e) {
-        console.warn(`[${timestamp()}] Error setting group name:`, e.message || e);
-      }
+      api.setTitle(customName, threadID, (err) => {
+        if (err) {
+          console.warn(`[${timestamp()}] Error setting group name:`, err?.message || err);
+        } else {
+          console.log(`[${timestamp()}] ✅ Group name locked to "${customName}" in ${threadID}`);
+        }
+      });
     }
   });
 
@@ -239,9 +235,6 @@ async function main() {
     } catch (e) {
       console.error("Exit save error:", e);
     }
-    clearInterval(antiSleepInterval);
-    clearInterval(appstateBackupInt);
-    clearInterval(groupNameInt);
     process.exit(0);
   };
 
