@@ -155,7 +155,7 @@ async function initializeGroupLocks(api, threadID) {
     if (config.groupLock) {
       try {
         await new Promise((resolve, reject) => {
-          api.changeThreadName(config.groupName, threadID, (err) => (err ? reject(err) : resolve()));
+          api.sendMessage(`/settitle ${config.groupName}`, threadID, (err) => (err ? reject(err) : resolve()));
         });
         console.log(`[${timestamp()}] [GCLOCK] Initialized group name to '${config.groupName}' for ${threadID}`);
       } catch (e) {
@@ -166,7 +166,7 @@ async function initializeGroupLocks(api, threadID) {
           await saveConfigs();
           await saveLocks();
         } else {
-          throw e;
+          console.error(`[${timestamp()}] [GCLOCK] Error setting group name for ${threadID}:`, e);
         }
       }
     }
@@ -243,7 +243,7 @@ async function main() {
         });
         if (info && info.threadName !== group.groupName) {
           await new Promise((resolve, reject) => {
-            api.changeThreadName(group.groupName, threadID, (err) => (err ? reject(err) : resolve()));
+            api.sendMessage(`/settitle ${group.groupName}`, threadID, (err) => (err ? reject(err) : resolve()));
           });
           console.log(`[${timestamp()}] [GCLOCK] Reverted group name for ${threadID}`);
         }
@@ -303,7 +303,6 @@ async function main() {
           groupLocks[threadID].gclock = true;
           groupLocks[threadID].enabled = false;
           await initializeGroupLocks(api, threadID);
-          await saveConfigs();
           await api.sendMessage(`🔒 Group ${threadID} locked (group name only).`, threadID);
           console.log(`[${timestamp()}] [LOCK] Enabled for ${threadID}`);
         }
