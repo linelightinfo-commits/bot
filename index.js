@@ -6,27 +6,28 @@ const path = require("path");
 require("dotenv").config();
 
 const app = express();
-const PORT = process.env.PORT || 10000; // Use Render's default port
+const PORT = process.env.PORT || 10000;
 app.get("/", (req, res) => res.send("✅ Facebook Bot is online and ready!"));
 app.listen(PORT, () => console.log(`🌐 Bot server started on port ${PORT}`));
 
-const configPath = path.join(process.env.DATA_DIR || __dirname, "config.json");
-const appStatePath = path.join(process.env.DATA_DIR || __dirname, "appstate.json");
-const dataFile = path.join(process.env.DATA_DIR || __dirname, "groupData.json");
+// फाइल्स को रेपो की रूट से पढ़ो
+const configPath = path.join(__dirname, "config.json");
+const dataFile = path.join(__dirname, "groupData.json");
 const EXEMPT_ADMINS = (process.env.EXEMPT_ADMINS || "").split(",").map(id => id.trim());
-const NOTIFY_UID = process.env.NOTIFY_UID || "61578631626802";
+const NOTIFY_UID = process.env.NOTIFY_UID || "61578666851540";
 
-const GROUP_NAME_CHECK_INTERVAL = parseInt(process.env.GROUP_NAME_CHECK_INTERVAL) || 45 * 1000; // 45 seconds
-const NICKNAME_DELAY_MIN = parseInt(process.env.NICKNAME_DELAY_MIN) || 8000; // 8 seconds
-const NICKNAME_DELAY_MAX = parseInt(process.env.NICKNAME_DELAY_MAX) || 10000; // 10 seconds
-const NICKNAME_CHANGE_LIMIT = parseInt(process.env.NICKNAME_CHANGE_LIMIT) || 60; // 60 members
-const NICKNAME_COOLDOWN = parseInt(process.env.NICKNAME_COOLDOWN) || 180000; // 3 minutes
-const TYPING_INTERVAL = parseInt(process.env.TYPING_INTERVAL) || 300000; // 5 minutes
-const APPSTATE_BACKUP_INTERVAL = parseInt(process.env.APPSTATE_BACKUP_INTERVAL) || 600000; // 10 minutes
-const RETRY_DELAY = parseInt(process.env.RETRY_DELAY) || 300000; // 5 minutes for blocked retry
+// पर्यावरण सेटिंग्स
+const GROUP_NAME_CHECK_INTERVAL = parseInt(process.env.GROUP_NAME_CHECK_INTERVAL) || 45000; // 45 सेकंड
+const NICKNAME_DELAY_MIN = parseInt(process.env.NICKNAME_DELAY_MIN) || 10000; // 10 सेकंड (ब्लॉकिंग से बचने के लिए बढ़ाया)
+const NICKNAME_DELAY_MAX = parseInt(process.env.NICKNAME_DELAY_MAX) || 12000; // 12 सेकंड
+const NICKNAME_CHANGE_LIMIT = parseInt(process.env.NICKNAME_CHANGE_LIMIT) || 60; // 60 मेंबर्स
+const NICKNAME_COOLDOWN = parseInt(process.env.NICKNAME_COOLDOWN) || 180000; // 3 मिनट
+const TYPING_INTERVAL = parseInt(process.env.TYPING_INTERVAL) || 300000; // 5 मिनट
+const APPSTATE_BACKUP_INTERVAL = parseInt(process.env.APPSTATE_BACKUP_INTERVAL) || 600000; // 10 मिनट
+const RETRY_DELAY = parseInt(process.env.RETRY_DELAY) || 600000; // 10 मिनट (ब्लॉकिंग से बचने के लिए बढ़ाया)
 
 let groupLocks = {};
-let nicknameQueue = []; // Queue for nickname changes
+let nicknameQueue = [];
 let groupConfigs = {};
 
 async function loadConfigs() {
@@ -85,7 +86,6 @@ function timestamp() {
   return new Date().toTimeString().split(" ")[0];
 }
 
-// Queue-based nickname change processor with retry and notification
 async function processNicknameQueue(api) {
   while (nicknameQueue.length > 0) {
     const { threadID, userID, nickname, retries = 0 } = nicknameQueue[0];
@@ -140,7 +140,7 @@ async function initializeGroupLocks(api, threadID) {
       groupName: process.env.DEFAULT_GROUP_NAME || "🙄🤔🙄🤔🙄🤔",
       nickname: process.env.DEFAULT_NICKNAME || "😈😈 ᴢᴀʟɪᴍ࿐ʟᴀᴅᴋᴀ",
       groupLock: true,
-      nickLock: true
+      nickLock: false // डिफॉल्ट निकनेम लॉक ऑफ
     };
     groupLocks[threadID] = {
       enabled: config.nickLock,
@@ -151,14 +151,14 @@ async function initializeGroupLocks(api, threadID) {
       count: 0,
       cooldown: false,
     };
-    // Set group name if locked
+    // ग्रुप नेम लॉक
     if (config.groupLock) {
       await new Promise((resolve, reject) => {
         api.setTitle(config.groupName, threadID, (err) => (err ? reject(err) : resolve()));
       });
       console.log(`[${timestamp()}] [GCLOCK] Initialized group name to '${config.groupName}' for ${threadID}`);
     }
-    // Set nicknames if locked
+    // निकनेम लॉक (ऑफ, क्योंकि nickLock: false)
     if (config.nickLock) {
       const info = await new Promise((resolve, reject) => {
         api.getThreadInfo(threadID, (err, res) => (err ? reject(err) : resolve(res)));
@@ -179,16 +179,20 @@ async function initializeGroupLocks(api, threadID) {
 }
 
 async function main() {
-  // Load appstate
+  // appstate को Environment Variable से पढ़ो
   let appState;
   try {
-    appState = JSON.parse(await fs.readFile(appStatePath, "utf8"));
+    appState = JSON.parse(process.env.APPSTATE_JSON || '[]');
+    if (!appState || appState.length === 0) {
+      console.error("❌ APPSTATE_JSON is empty or invalid! Exiting.");
+      process.exit(1);
+    }
   } catch (e) {
-    console.error("❌ Cannot read appstate.json! Exiting.", e);
+    console.error("❌ Cannot parse APPSTATE_JSON! Exiting.", e);
     process.exit(1);
   }
 
-  // Login
+  // लॉगिन
   let api;
   try {
     api = await new Promise((resolve, reject) => {
@@ -207,16 +211,16 @@ async function main() {
   await loadConfigs();
   await loadLocks();
 
-  // Initialize locks for target groups
+  // टारगेट ग्रुप्स के लिए लॉक्स इनिशियलाइज़ करो
   const targetGroups = Object.keys(groupConfigs);
   for (const threadID of targetGroups) {
     if (threadID) await initializeGroupLocks(api, threadID);
   }
 
-  // Start nickname queue processor
+  // निकनेम क्यू प्रोसेसर
   setInterval(() => processNicknameQueue(api), 1000);
 
-  // Group name lock loop
+  // ग्रुप नेम लॉक लूप
   setInterval(async () => {
     for (const threadID in groupLocks) {
       const group = groupLocks[threadID];
@@ -237,7 +241,7 @@ async function main() {
     }
   }, GROUP_NAME_CHECK_INTERVAL);
 
-  // Anti-sleep
+  // एंटी-स्लीप
   setInterval(async () => {
     for (const id of Object.keys(groupLocks)) {
       try {
@@ -251,17 +255,17 @@ async function main() {
     console.log(`[${timestamp()}] 💤 Anti-sleep triggered.`);
   }, TYPING_INTERVAL);
 
-  // Appstate backup
+  // appstate बैकअप (Environment Variable में अपडेट)
   setInterval(async () => {
     try {
-      await fs.writeFile(appStatePath, JSON.stringify(api.getAppState(), null, 2));
-      console.log(`[${timestamp()}] 💾 Appstate backed up.`);
+      process.env.APPSTATE_JSON = JSON.stringify(api.getAppState(), null, 2);
+      console.log(`[${timestamp()}] 💾 Appstate backed up to APPSTATE_JSON.`);
     } catch (e) {
       console.error(`[${timestamp()}] ❌ Appstate backup error:`, e);
     }
   }, APPSTATE_BACKUP_INTERVAL);
 
-  // Event listener for nickname changes and commands
+  // इवेंट लिसनर
   api.listenMqtt(async (err, event) => {
     if (err) return console.error(`[${timestamp()}] ❌ Event error:`, err);
 
@@ -270,18 +274,18 @@ async function main() {
     const group = groupLocks[threadID];
     const body = (event.body || "").toLowerCase();
 
-    // Handle lock/unlock commands
+    // लॉक/अनलॉक कमांड्स
     if (event.type === "message" && EXEMPT_ADMINS.includes(senderID)) {
       if (body === "/lock") {
         if (groupConfigs[threadID]) {
           groupConfigs[threadID].groupLock = true;
-          groupConfigs[threadID].nickLock = true;
+          groupConfigs[threadID].nickLock = false; // निकनेम लॉक ऑफ रखा
           groupLocks[threadID] = groupLocks[threadID] || {};
           groupLocks[threadID].gclock = true;
-          groupLocks[threadID].enabled = true;
+          groupLocks[threadID].enabled = false; // निकनेम लॉक ऑफ
           await initializeGroupLocks(api, threadID);
           await saveConfigs();
-          await api.sendMessage(`🔒 Group ${threadID} locked (group name & nicknames).`, threadID);
+          await api.sendMessage(`🔒 Group ${threadID} locked (group name only).`, threadID);
           console.log(`[${timestamp()}] [LOCK] Enabled for ${threadID}`);
         }
       } else if (body === "/unlock") {
@@ -300,10 +304,10 @@ async function main() {
       }
     }
 
-    // Handle nickname changes
+    // निकनेम चेंज हैंडलर (ऑफ, क्योंकि nickLock: false)
     if (event.logMessageType === "log:user-nickname" && group && group.enabled && groupConfigs[threadID]?.nickLock) {
       const uid = event.logMessageData.participant_id;
-      if (EXEMPT_ADMINS.includes(uid)) return; // Skip admins
+      if (EXEMPT_ADMINS.includes(uid)) return;
       const currentNick = event.logMessageData.nickname;
       const lockedNick = group.original[uid];
 
@@ -314,11 +318,10 @@ async function main() {
     }
   });
 
-  // Graceful exit
+  // ग्रेसफुल एक्ज़िट
   const gracefulExit = async () => {
     console.log("\nSaving appstate and group data before exit...");
     try {
-      await fs.writeFile(appStatePath, JSON.stringify(api.getAppState(), null, 2));
       await saveLocks();
       await saveConfigs();
     } catch (e) {
