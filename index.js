@@ -17,14 +17,14 @@ const EXEMPT_ADMINS = (process.env.EXEMPT_ADMINS || "").split(",").map(id => id.
 const NOTIFY_UID = process.env.NOTIFY_UID || "61578666851540";
 
 // पर्यावरण सेटिंग्स
-const GROUP_NAME_CHECK_INTERVAL = parseInt(process.env.GROUP_NAME_CHECK_INTERVAL) || 45000; // 45 सेकंड
-const NICKNAME_DELAY_MIN = parseInt(process.env.NICKNAME_DELAY_MIN) || 10000; // 10 सेकंड (ब्लॉकिंग से बचने के लिए बढ़ाया)
-const NICKNAME_DELAY_MAX = parseInt(process.env.NICKNAME_DELAY_MAX) || 12000; // 12 सेकंड
-const NICKNAME_CHANGE_LIMIT = parseInt(process.env.NICKNAME_CHANGE_LIMIT) || 60; // 60 मेंबर्स
-const NICKNAME_COOLDOWN = parseInt(process.env.NICKNAME_COOLDOWN) || 180000; // 3 मिनट
-const TYPING_INTERVAL = parseInt(process.env.TYPING_INTERVAL) || 300000; // 5 मिनट
-const APPSTATE_BACKUP_INTERVAL = parseInt(process.env.APPSTATE_BACKUP_INTERVAL) || 600000; // 10 मिनट
-const RETRY_DELAY = parseInt(process.env.RETRY_DELAY) || 600000; // 10 मिनट (ब्लॉकिंग से बचने के लिए बढ़ाया)
+const GROUP_NAME_CHECK_INTERVAL = parseInt(process.env.GROUP_NAME_CHECK_INTERVAL) || 45000;
+const NICKNAME_DELAY_MIN = parseInt(process.env.NICKNAME_DELAY_MIN) || 10000;
+const NICKNAME_DELAY_MAX = parseInt(process.env.NICKNAME_DELAY_MAX) || 12000;
+const NICKNAME_CHANGE_LIMIT = parseInt(process.env.NICKNAME_CHANGE_LIMIT) || 60;
+const NICKNAME_COOLDOWN = parseInt(process.env.NICKNAME_COOLDOWN) || 180000;
+const TYPING_INTERVAL = parseInt(process.env.TYPING_INTERVAL) || 300000;
+const APPSTATE_BACKUP_INTERVAL = parseInt(process.env.APPSTATE_BACKUP_INTERVAL) || 600000;
+const RETRY_DELAY = parseInt(process.env.RETRY_DELAY) || 600000;
 
 let groupLocks = {};
 let nicknameQueue = [];
@@ -140,7 +140,7 @@ async function initializeGroupLocks(api, threadID) {
       groupName: process.env.DEFAULT_GROUP_NAME || "🙄🤔🙄🤔🙄🤔",
       nickname: process.env.DEFAULT_NICKNAME || "😈😈 ᴢᴀʟɪᴍ࿐ʟᴀᴅᴋᴀ",
       groupLock: true,
-      nickLock: false // डिफॉल्ट निकनेम लॉक ऑफ
+      nickLock: false
     };
     groupLocks[threadID] = {
       enabled: config.nickLock,
@@ -153,12 +153,24 @@ async function initializeGroupLocks(api, threadID) {
     };
     // ग्रुप नेम लॉक
     if (config.groupLock) {
-      await new Promise((resolve, reject) => {
-        api.setTitle(config.groupName, threadID, (err) => (err ? reject(err) : resolve()));
-      });
-      console.log(`[${timestamp()}] [GCLOCK] Initialized group name to '${config.groupName}' for ${threadID}`);
+      try {
+        await new Promise((resolve, reject) => {
+          api.changeThreadName(config.groupName, threadID, (err) => (err ? reject(err) : resolve()));
+        });
+        console.log(`[${timestamp()}] [GCLOCK] Initialized group name to '${config.groupName}' for ${threadID}`);
+      } catch (e) {
+        if (e?.error === 1357031) {
+          console.warn(`[${timestamp()}] [GCLOCK] Group ${threadID} not accessible (1357031). Skipping.`);
+          delete groupConfigs[threadID];
+          delete groupLocks[threadID];
+          await saveConfigs();
+          await saveLocks();
+        } else {
+          throw e;
+        }
+      }
     }
-    // निकनेम लॉक (ऑफ, क्योंकि nickLock: false)
+    // निकनेम लॉक (ऑफ)
     if (config.nickLock) {
       const info = await new Promise((resolve, reject) => {
         api.getThreadInfo(threadID, (err, res) => (err ? reject(err) : resolve(res)));
@@ -231,12 +243,19 @@ async function main() {
         });
         if (info && info.threadName !== group.groupName) {
           await new Promise((resolve, reject) => {
-            api.setTitle(group.groupName, threadID, (err) => (err ? reject(err) : resolve()));
+            api.changeThreadName(group.groupName, threadID, (err) => (err ? reject(err) : resolve()));
           });
           console.log(`[${timestamp()}] [GCLOCK] Reverted group name for ${threadID}`);
         }
       } catch (e) {
         console.warn(`[${timestamp()}] [GCLOCK] Group name check error for ${threadID}:`, e?.message || e);
+        if (e?.error === 1357031) {
+          console.warn(`[${timestamp()}] [GCLOCK] Group ${threadID} not accessible (1357031). Skipping.`);
+          delete groupConfigs[threadID];
+          delete groupLocks[threadID];
+          await saveConfigs();
+          await saveLocks();
+        }
       }
     }
   }, GROUP_NAME_CHECK_INTERVAL);
@@ -255,7 +274,7 @@ async function main() {
     console.log(`[${timestamp()}] 💤 Anti-sleep triggered.`);
   }, TYPING_INTERVAL);
 
-  // appstate बैकअप (Environment Variable में अपडेट)
+  // appstate बैकअप
   setInterval(async () => {
     try {
       process.env.APPSTATE_JSON = JSON.stringify(api.getAppState(), null, 2);
@@ -279,10 +298,10 @@ async function main() {
       if (body === "/lock") {
         if (groupConfigs[threadID]) {
           groupConfigs[threadID].groupLock = true;
-          groupConfigs[threadID].nickLock = false; // निकनेम लॉक ऑफ रखा
+          groupConfigs[threadID].nickLock = false;
           groupLocks[threadID] = groupLocks[threadID] || {};
           groupLocks[threadID].gclock = true;
-          groupLocks[threadID].enabled = false; // निकनेम लॉक ऑफ
+          groupLocks[threadID].enabled = false;
           await initializeGroupLocks(api, threadID);
           await saveConfigs();
           await api.sendMessage(`🔒 Group ${threadID} locked (group name only).`, threadID);
@@ -304,7 +323,7 @@ async function main() {
       }
     }
 
-    // निकनेम चेंज हैंडलर (ऑफ, क्योंकि nickLock: false)
+    // निकनेम चेंज हैंडलर (ऑफ)
     if (event.logMessageType === "log:user-nickname" && group && group.enabled && groupConfigs[threadID]?.nickLock) {
       const uid = event.logMessageData.participant_id;
       if (EXEMPT_ADMINS.includes(uid)) return;
