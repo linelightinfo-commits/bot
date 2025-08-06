@@ -3,7 +3,7 @@
     "groupName": "🙄🤔Group1",
     "nickname": "😈Zalim1",
     "groupLock": true,
-    "nickLock": true
+    "nickLock": false
   },
   "123456789": {
     "groupName": "🔥Group2",
