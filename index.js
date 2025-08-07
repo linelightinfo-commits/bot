@@ -1,4 +1,4 @@
-const login = require("ws3-fca");
+const { login } = require("ws3-fca");
 const fs = require("fs");
 const path = require("path");
 const http = require("http");
