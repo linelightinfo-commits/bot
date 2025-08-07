@@ -125,16 +125,24 @@ async function main() {
   // लॉगिन
   let api;
   try {
+    console.log("[🔄] Attempting login...");
     api = await new Promise((resolve, reject) => {
       login(
         { appState, userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1" },
-        (err, api) => (err ? reject(err) : resolve(api))
+        (err, api) => {
+          if (err) {
+            console.error("[❌] Login error details:", err);
+            reject(err);
+          } else {
+            resolve(api);
+          }
+        }
       );
     });
     api.setOptions({ listenEvents: true, selfListen: true, updatePresence: true });
     console.log(`[✅] Logged in as: ${api.getCurrentUserID()}`);
   } catch (err) {
-    console.error("[❌] Login failed:", err);
+    console.error("[❌] Login failed:", err.message || err);
     process.exit(1);
   }
 
