@@ -9,6 +9,8 @@ const { setTimeout: wait } = require("timers/promises");
 const app = express();
 const PORT = process.env.PORT || 10000;
 const ADMIN_UID = process.env.ADMIN_UID || "61578666851540";
+const LOGIN_RETRY_DELAY = 300000; // 5 मिनट
+const MAX_LOGIN_RETRIES = 3;
 
 app.get("/", (_, res) => res.send("✅ Bot is running."));
 app.listen(PORT, () => console.log(`[🌐] Express live on port ${PORT}`));
@@ -50,6 +52,10 @@ async function initializeGroupLocks(api) {
             }
           } catch (err) {
             console.log(`[⚠️] Failed to set nick for ${userID}:`, err.message);
+            if (err?.error === 3252001) {
+              console.log(`[⚠️] Blocked (3252001). Retrying after ${LOGIN_RETRY_DELAY / 1000} seconds...`);
+              await wait(LOGIN_RETRY_DELAY);
+            }
           }
         }
       }
@@ -72,6 +78,9 @@ async function initializeGroupLocks(api) {
             console.warn(`[❌] Group ${threadID} not accessible (1357031). Skipping.`);
             delete groupData[threadID];
             await fs.writeFile(groupDataPath, JSON.stringify(groupData, null, 2));
+          } else if (err?.error === 3252001) {
+            console.log(`[⚠️] Blocked (3252001). Retrying after ${LOGIN_RETRY_DELAY / 1000} seconds...`);
+            await wait(LOGIN_RETRY_DELAY);
           }
         }
       }, 45000);
@@ -108,33 +117,61 @@ function randomDelay(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+async function attemptLogin(appState, retries = 0) {
+  try {
+    console.log(`[🔄] Attempting login (Attempt ${retries + 1}/${MAX_LOGIN_RETRIES})...`);
+    const api = await new Promise((resolve, reject) => {
+      login(
+        { appState, userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1" },
+        (err, api) => {
+          if (err) {
+            console.error("[❌] Login error details:", err);
+            reject(err);
+          } else {
+            resolve(api);
+          }
+        }
+      );
+    });
+    api.setOptions({ listenEvents: true, selfListen: true, updatePresence: true });
+    console.log(`[✅] Logged in as: ${api.getCurrentUserID()}`);
+    return api;
+  } catch (err) {
+    if (retries < MAX_LOGIN_RETRIES - 1) {
+      console.log(`[⚠️] Login failed. Retrying in ${LOGIN_RETRY_DELAY / 1000} seconds...`);
+      await wait(LOGIN_RETRY_DELAY);
+      return attemptLogin(appState, retries + 1);
+    } else {
+      throw new Error(`Max login retries (${MAX_LOGIN_RETRIES}) exceeded: ${err.message}`);
+    }
+  }
+}
+
 async function main() {
   // appstate को Environment Variable से पढ़ो
   let appState;
   try {
-    appState = JSON.parse(process.env.APPSTATE_JSON || '[]');
+    if (!process.env.APPSTATE_JSON) {
+      console.error("[❌] APPSTATE_JSON is not set in environment variables!");
+      throw new Error("APPSTATE_JSON not set");
+    }
+    appState = JSON.parse(process.env.APPSTATE_JSON);
     if (!appState || appState.length === 0) {
-      console.error("[❌] APPSTATE_JSON is empty or invalid! Exiting.");
-      process.exit(1);
+      console.error("[❌] APPSTATE_JSON is empty or invalid!");
+      throw new Error("APPSTATE_JSON is empty or invalid");
     }
   } catch (e) {
-    console.error("[❌] Cannot parse APPSTATE_JSON! Exiting.", e);
+    console.error("[❌] Failed to parse APPSTATE_JSON:", e.message);
+    console.log("[⚠️] Please set a valid APPSTATE_JSON in Render's Environment settings.");
     process.exit(1);
   }
 
   // लॉगिन
   let api;
   try {
-    api = await new Promise((resolve, reject) => {
-      login(
-        { appState, userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1" },
-        (err, api) => (err ? reject(err) : resolve(api))
-      );
-    });
-    api.setOptions({ listenEvents: true, selfListen: true, updatePresence: true });
-    console.log(`[✅] Logged in as: ${api.getCurrentUserID()}`);
+    api = await attemptLogin(appState);
   } catch (err) {
-    console.error("[❌] Login failed:", err);
+    console.error("[❌] Login failed after retries:", err.message || err);
     process.exit(1);
   }
 
