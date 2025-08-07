@@ -22,9 +22,11 @@ async function initializeGroupLocks(api) {
     if (await fs.access(groupDataPath).then(() => true).catch(() => false)) {
       groupData = JSON.parse(await fs.readFile(groupDataPath, "utf8"));
       console.log("[🔁] Loaded group data from groupData.json.");
+    } else {
+      console.log("[⚠️] groupData.json not found. Starting with empty group data.");
     }
   } catch (e) {
-    console.error("[❌] Failed to load groupData.json:", e);
+    console.error("[❌] Failed to load groupData.json:", e.message);
   }
 
   for (const threadID of Object.keys(groupData)) {
@@ -70,7 +72,9 @@ async function initializeGroupLocks(api) {
             await new Promise((resolve, reject) => {
               api.sendMessage(`/settitle ${group.groupName}`, threadID, (err) => (err ? reject(err) : resolve()));
             });
-            console.log(`[🔁] Reverted group name in ${threadID}`);
+            console.log(`[🔁] Reverted group name in ${threadID} to ${group.groupName}`);
+          } else {
+            console.log(`[✅] Group name in ${threadID} is already ${group.groupName}`);
           }
         } catch (err) {
           console.log(`[❌] Error checking group name for ${threadID}:`, err.message);
@@ -96,20 +100,29 @@ async function initializeGroupLocks(api) {
   }
 }
 
-function startAntiSleep(api) {
-  setInterval(() => {
-    const groupDataPath = path.join(__dirname, "groupData.json");
+async function startAntiSleep(api) {
+  const groupDataPath = path.join(__dirname, "groupData.json");
+  setInterval(async () => {
     let groupData = {};
     try {
-      groupData = JSON.parse(fs.readFileSync(groupDataPath, "utf8"));
+      if (await fs.access(groupDataPath).then(() => true).catch(() => false)) {
+        groupData = JSON.parse(await fs.readFile(groupDataPath, "utf8"));
+        console.log("[🔁] Loaded groupData.json for anti-sleep.");
+      } else {
+        console.log("[⚠️] groupData.json not found for anti-sleep.");
+      }
     } catch (e) {
-      console.error("[❌] Failed to read groupData.json for anti-sleep:", e);
+      console.error("[❌] Failed to read groupData.json for anti-sleep:", e.message);
     }
 
     for (const threadID of Object.keys(groupData)) {
-      api.sendTypingIndicator(threadID).catch(() => {});
+      try {
+        await api.sendTypingIndicator(threadID);
+        console.log(`[💤] Anti-sleep ping sent to ${threadID}`);
+      } catch (err) {
+        console.error(`[❌] Failed to send anti-sleep ping to ${threadID}:`, err.message);
+      }
     }
-    console.log(`[💤] Anti-sleep ping sent.`);
   }, 5 * 60 * 1000);
 }
 
