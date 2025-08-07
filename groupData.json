@@ -1,8 +1,11 @@
 {
   "24137017955931168": {
-    "groupName": "🙄🤔Group1",
-    "nicknames": {},
+    "groupName": "🔥 Zalim Group 🔥",
+    "nicknameLock": true,
     "groupNameLock": true,
-    "nicknameLock": false
+    "nicknames": {
+      "100001234567890": "👑 Don 👑",
+      "100009876543210": "💀 Killer 💀"
+    }
   }
 }
