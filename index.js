@@ -1,112 +1,74 @@
-const login = require("ws3-fca");
 const fs = require("fs");
-const path = require("path");
-const http = require("http");
+const express = require("express");
+const login = require("ws3-fca");
 
-const appStateFile = path.join(__dirname, "appstate.json");
-const groupDataFile = path.join(__dirname, "data.json");
+const app = express();
+const port = process.env.PORT || 10000;
 
-let groupData = fs.existsSync(groupDataFile)
-  ? JSON.parse(fs.readFileSync(groupDataFile, "utf8"))
-  : {};
+// Load appState and group config
+const appStateFile = "appstate.json";
+const groupDataFile = "data.json";
 
-function log(message) {
-  console.log(`[${new Date().toLocaleTimeString()}] ${message}`);
-}
+let groupData = JSON.parse(fs.readFileSync(groupDataFile, "utf8"));
 
-function randomDelay(min, max) {
-  return new Promise(resolve =>
-    setTimeout(resolve, Math.random() * (max - min) + min)
-  );
-}
+// Create HTTP server for Render
+app.get("/", (req, res) => {
+  res.send("Facebook Group Bot is running!");
+});
 
-login({ appState: JSON.parse(fs.readFileSync(appStateFile, "utf8")) }, async (err, api) => {
-  if (err) return console.error("❌ Login failed:", err);
+app.listen(port, () => {
+  console.log(`[HTTP] Server running on port ${port}`);
+});
+
+// Login
+login({ appState: JSON.parse(fs.readFileSync(appStateFile, "utf8")) }, (err, api) => {
+  if (err) return console.error(err);
+
+  console.log("[BOT] Logged in successfully!");
 
   api.setOptions({
     listenEvents: true,
-    selfListen: false,
-    forceLogin: true,
-    updatePresence: false,
-    autoMarkDelivery: true
+    selfListen: false
   });
 
-  log("✅ Bot started...");
+  api.listenMqtt((err, event) => {
+    if (err) return console.error(err);
 
-  // Nickname lock loop
-  async function enforceNicknames() {
-    while (true) {
-      for (const threadID of Object.keys(groupData)) {
-        const data = groupData[threadID];
-        if (!data.nicknamesLocked || !data.nicknames) continue;
+    // Group name change detection
+    if (event.type === "log:subscribe" || event.type === "log:unsubscribe") return;
 
-        try {
-          const info = await api.getThreadInfo(threadID);
-          if (!info || !info.userInfo) continue;
-
-          for (const user of info.userInfo) {
-            const correctNick = data.nicknames[user.id];
-            if (correctNick && user.nickname !== correctNick) {
-              log(`🔄 Changing nickname for ${user.name} in ${threadID}`);
-              await randomDelay(45000, 46000); // 45 sec delay
-              await api.changeNickname(correctNick, threadID, user.id);
-            }
+    if (event.type === "event") {
+      // Group name change
+      if (event.logMessageType === "log:thread-name") {
+        const groupId = event.threadID;
+        if (groupData[groupId] && groupData[groupId].groupNameLock) {
+          const desiredName = groupData[groupId].groupName;
+          if (event.logMessageData.name !== desiredName) {
+            console.log(`[GroupNameLock] Reverting name in group ${groupId}...`);
+            api.setTitle(desiredName, groupId, (err) => {
+              if (err) console.error(err);
+            });
           }
-        } catch (e) {
-          log(`❌ Error nickname lock for ${threadID}: ${e.message}`);
         }
       }
-      await randomDelay(5000, 8000);
-    }
-  }
 
-  // Group name lock loop
-  async function enforceGroupNames() {
-    while (true) {
-      for (const threadID of Object.keys(groupData)) {
-        const data = groupData[threadID];
-        if (!data.groupNameLocked || !data.groupName) continue;
+      // Nickname change
+      if (event.logMessageType === "log:user-nickname") {
+        const groupId = event.threadID;
+        if (groupData[groupId] && groupData[groupId].nicknameLock) {
+          const userId = event.logMessageData.participant_id;
+          const desiredNickname = groupData[groupId].nicknames[userId];
 
-        try {
-          const info = await api.getThreadInfo(threadID);
-          if (!info || !info.threadName) continue;
-
-          if (info.threadName !== data.groupName) {
-            log(`🔁 Changing group name for ${threadID}`);
-            await api.setTitle(data.groupName, threadID);
+          if (desiredNickname && event.logMessageData.nickname !== desiredNickname) {
+            console.log(`[NicknameLock] Nickname change detected for user ${userId} in group ${groupId}, reverting in 45s...`);
+            setTimeout(() => {
+              api.changeNickname(desiredNickname, userId, groupId, (err) => {
+                if (err) console.error(err);
+              });
+            }, 45000); // 45 seconds
           }
-        } catch (e) {
-          log(`❌ Error group name lock for ${threadID}: ${e.message}`);
         }
       }
-      await randomDelay(40000, 50000); // every ~45 sec
     }
-  }
-
-  // Typing indicator to keep session alive
-  setInterval(() => {
-    for (const threadID of Object.keys(groupData)) {
-      api.sendTypingIndicator(threadID).catch(() => {});
-    }
-  }, 300000);
-
-  // Auto appstate backup every 10 min
-  setInterval(() => {
-    if (api && api.getAppState) {
-      fs.writeFileSync(appStateFile, JSON.stringify(api.getAppState(), null, 2));
-      log("💾 Appstate backup saved.");
-    }
-  }, 600000);
-
-  // Start loops
-  enforceNicknames();
-  enforceGroupNames();
-
-  // HTTP server for Render
-  http.createServer((req, res) => {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("Bot is running.");
-  }).listen(process.env.PORT || 10000, () => {
-    log(`🌐 HTTP server running on port ${process.env.PORT || 10000}`);
   });
 });
