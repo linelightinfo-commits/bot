@@ -1,554 +1,290 @@
-const fs = require("fs");
+const ws3 = require("ws3-fca");
+const login = typeof ws3 === "function" ? ws3 : (ws3.default || ws3.login || ws3);
+const fs = require("fs").promises;
+const express = require("express");
 const path = require("path");
-const http = require("http");
-const { promisify } = require("util");
-const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
-const LOGIN_RETRY_DELAY = 1200000; // 20 मिनट
-const ADMIN_UID = process.env.ADMIN_UID || "61578666851540";
+const puppeteer = require("puppeteer");
+require("dotenv").config();
+
+const app = express();
 const PORT = process.env.PORT || 10000;
-const USE_PUPPETEER = true;
+app.get("/", (req, res) => res.send("✅ Facebook Bot is online and ready!"));
+app.listen(PORT, () => console.log(`🌐 Bot server started on port ${PORT}`));
 
-// Try require ws3-fca or fallback to fca-unofficial
-let login;
-try {
-  const ws3 = require("ws3-fca");
-  login = typeof ws3 === "function" ? ws3 : (ws3.login || ws3.default || ws3);
-} catch (e) {
+// CONFIG
+const BOSS_UID = process.env.BOSS_UID || "61578631626802";
+const appStatePath = path.join(process.env.DATA_DIR || __dirname, "appstate.json");
+const dataFile = path.join(process.env.DATA_DIR || __dirname, "groupData.json");
+
+const GROUP_NAME_CHECK_INTERVAL = 45000; // check every 45s
+const GROUP_NAME_REVERT_DELAY = 45000; // revert after 45s of detection
+const NICKNAME_DELAY_MIN = 6000;
+const NICKNAME_DELAY_MAX = 7000;
+const NICKNAME_CHANGE_LIMIT = 60;
+const NICKNAME_COOLDOWN = 180000; // 3 min
+const TYPING_INTERVAL = 300000;
+const APPSTATE_BACKUP_INTERVAL = 600000;
+
+let groupLocks = {};
+let groupNameChangeDetected = {};
+
+async function loadLocks() {
   try {
-    const fca = require("fca-unofficial");
-    login = typeof fca === "function" ? fca : (fca.login || fca.default || fca);
-    console.warn(`[${new Date().toLocaleTimeString()}] ⚠ ws3-fca failed, using fca-unofficial`);
-  } catch (e2) {
-    console.error(`[${new Date().toLocaleTimeString()}] ❌ Neither ws3-fca nor fca-unofficial installed. Install one first.`);
+    if (await fs.access(dataFile).then(() => true).catch(() => false)) {
+      groupLocks = JSON.parse(await fs.readFile(dataFile, "utf8"));
+      console.log("🔁 Loaded saved group locks.");
+    }
+  } catch (e) {
+    console.error("❌ Failed to load groupData.json", e);
+  }
+}
+
+async function saveLocks() {
+  try {
+    const tempPath = `${dataFile}.tmp`;
+    await fs.writeFile(tempPath, JSON.stringify(groupLocks, null, 2));
+    await fs.rename(tempPath, dataFile);
+  } catch (e) {
+    console.error("❌ Failed to save groupData.json", e);
+  }
+}
+
+function delay(ms) {
+  return new Promise((res) => setTimeout(res, ms));
+}
+function randomDelay() {
+  return Math.floor(Math.random() * (NICKNAME_DELAY_MAX - NICKNAME_DELAY_MIN + 1)) + NICKNAME_DELAY_MIN;
+}
+function timestamp() {
+  return new Date().toTimeString().split(" ")[0];
+}
+
+async function startPuppeteer() {
+  try {
+    const browser = await puppeteer.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"]
+    });
+    const page = await browser.newPage();
+    await page.goto("https://www.facebook.com", { waitUntil: "networkidle2" });
+    console.log(`[${timestamp()}] 🛡 Puppeteer keep-alive started.`);
+  } catch (e) {
+    console.error(`[${timestamp()}] ❌ Puppeteer error:`, e.message);
+  }
+}
+
+async function main() {
+  // Start Puppeteer keep-alive
+  startPuppeteer();
+
+  // Load appstate
+  let appState;
+  try {
+    appState = JSON.parse(await fs.readFile(appStatePath, "utf8"));
+  } catch (e) {
+    console.error("❌ Cannot read appstate.json! Exiting.", e);
     process.exit(1);
   }
-}
 
-// Load and validate appstate
-let appState;
-const appStatePath = path.join(__dirname, "appstate.json");
-if (process.env.APPSTATE_JSON) {
-  try {
-    const parsed = JSON.parse(process.env.APPSTATE_JSON);
-    if (Array.isArray(parsed) && parsed.every(item => item.key && item.value && item.domain)) {
-      appState = parsed;
-    } else {
-      console.error(`[${new Date().toLocaleTimeString()}] ❌ APPSTATE_JSON is not a valid appstate array`);
-      process.exit(1);
-    }
-  } catch (e) {
-    console.error(`[${new Date().toLocaleTimeString()}] ❌ Failed to parse APPSTATE_JSON env var: ${e.message}`);
-    process.exit(1);
-  }
-} else if (fs.existsSync(appStatePath)) {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(appStatePath, "utf8"));
-    if (Array.isArray(parsed) && parsed.every(item => item.key && item.value && item.domain)) {
-      appState = parsed;
-    } else {
-      console.error(`[${new Date().toLocaleTimeString()}] ❌ appstate.json is not a valid appstate array`);
-      process.exit(1);
-    }
-  } catch (e) {
-    console.error(`[${new Date().toLocaleTimeString()}] ❌ Failed to read appstate.json: ${e.message}`);
-    process.exit(1);
-  }
-} else {
-  console.error(`[${new Date().toLocaleTimeString()}] ❌ No appstate found. Provide appstate.json or APPSTATE_JSON env var`);
-  process.exit(1);
-}
-
-// Load groupData
-const groupDataPath = path.join(__dirname, "groupData.json");
-let groupData = {};
-if (fs.existsSync(groupDataPath)) {
-  try {
-    groupData = JSON.parse(fs.readFileSync(groupDataPath, "utf8"));
-  } catch (e) {
-    console.warn(`[${new Date().toLocaleTimeString()}] ⚠ Failed to parse groupData.json. Starting empty.`);
-    groupData = {};
-  }
-} else {
-  fs.writeFileSync(groupDataPath, JSON.stringify({}, null, 2));
-}
-
-// HTTP health server
-http.createServer((req, res) => {
-  res.writeHead(200, { "Content-Type": "text/plain" });
-  res.end("Bot is running.\n");
-}).listen(PORT, () => console.log(`[${new Date().toLocaleTimeString()}] 🌐 HTTP server listening on port ${PORT}`));
-
-/* ---------------------- Helpers ---------------------- */
-function saveGroupData() {
-  try {
-    fs.writeFileSync(groupDataPath, JSON.stringify(groupData, null, 2));
-    console.log(`[${new Date().toLocaleTimeString()}] 💾 groupData.json saved`);
-  } catch (e) {
-    console.error(`[${new Date().toLocaleTimeString()}] ❌ Failed to save groupData: ${e.message}`);
-  }
-}
-
-async function backupAppState(api) {
-  try {
-    if (api && api.getAppState) {
-      const s = api.getAppState();
-      if (Array.isArray(s) && s.every(item => item.key && item.value && item.domain)) {
-        fs.writeFileSync(appStatePath, JSON.stringify(s, null, 2));
-        console.log(`[${new Date().toLocaleTimeString()}] 💾 Appstate backed up`);
-      }
-    }
-  } catch (e) {
-    console.warn(`[${new Date().toLocaleTimeString()}] ⚠ Appstate backup failed: ${e.message}`);
-  }
-}
-
-async function refreshAppState(api) {
-  try {
-    console.log(`[${new Date().toLocaleTimeString()}] 🔄 Refreshing appstate...`);
-    const newAppState = api.getAppState();
-    if (Array.isArray(newAppState) && newAppState.every(item => item.key && item.value && item.domain)) {
-      appState = newAppState;
-      fs.writeFileSync(appStatePath, JSON.stringify(appState, null, 2));
-      console.log(`[${new Date().toLocaleTimeString()}] ✅ Appstate refreshed and saved`);
-      return true;
-    }
-    return false;
-  } catch (e) {
-    console.warn(`[${new Date().toLocaleTimeString()}] ❌ Appstate refresh failed: ${e?.message || e}`);
-    return false;
-  }
-}
-
-/* ---------------------- Puppeteer fallback ---------------------- */
-let puppeteer;
-async function loadPuppeteer() {
-  if (!USE_PUPPETEER) return null;
-  if (!puppeteer) {
-    try {
-      puppeteer = require("puppeteer");
-    } catch (e) {
-      console.warn(`[${new Date().toLocaleTimeString()}] ⚠ Puppeteer not installed. Install 'puppeteer' for fallback.`);
-      return null;
-    }
-  }
-  return puppeteer;
-}
-
-function appstateToCookies(appState) {
-  const cookies = [];
-  try {
-    if (Array.isArray(appState)) {
-      for (const kv of appState) {
-        if (kv && typeof kv === "object") {
-          if (kv.key && kv.value && kv.domain) {
-            cookies.push({ name: kv.key, value: kv.value, domain: kv.domain, path: "/", httpOnly: false, secure: true });
-          } else if (kv.name && kv.value && kv.domain) {
-            cookies.push({ name: kv.name, value: kv.value, domain: kv.domain, path: "/", httpOnly: false, secure: true });
-          }
-        }
-      }
-    }
-  } catch (e) {
-    console.warn(`[${new Date().toLocaleTimeString()}] ⚠ appstate->cookies parsing error: ${e.message}`);
-  }
-  const uniq = [];
-  const seen = new Set();
-  for (const c of cookies) {
-    const key = `${c.name}@${c.domain}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      uniq.push(c);
-    }
-  }
-  return uniq;
-}
-
-/* ---------------------- Core: Login + Features ---------------------- */
-(async () => {
+  // Login
   let api;
-  let isLoggedIn = false;
-  async function attemptLogin() {
-    if (isLoggedIn) {
-      console.log(`[${new Date().toLocaleTimeString()}] ℹ️ Already logged in. Skipping login attempt.`);
-      return true;
-    }
-    try {
-      api = await new Promise((resolve, reject) => {
-        try {
-          login({ appState, userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1" }, (err, api2) => (err ? reject(err) : resolve(api2)));
-        } catch (e) {
-          reject(e);
-        }
-      });
-      api.setOptions({ listenEvents: true, selfListen: false });
-      isLoggedIn = true;
-      console.log(`[${new Date().toLocaleTimeString()}] ✅ Logged in as: ${api.getCurrentUserID ? api.getCurrentUserID() : "(unknown)"}`);
-      return true;
-    } catch (e) {
-      console.error(`[${new Date().toLocaleTimeString()}] ❌ Login via appstate failed: ${e?.message || e}`);
-      isLoggedIn = false;
-      return false;
-    }
-  }
-
-  // Initial login
-  if (!(await attemptLogin())) {
-    console.error(`[${new Date().toLocaleTimeString()}] ❌ Login failed. Exiting.`);
+  try {
+    api = await new Promise((resolve, reject) => {
+      login({ appState }, (err, api) => (err ? reject(err) : resolve(api)));
+    });
+    api.setOptions({ listenEvents: true, selfListen: true, updatePresence: true });
+    console.log(`✅ Logged in as: ${api.getCurrentUserID()}`);
+  } catch (err) {
+    console.error("❌ Login failed:", err);
     process.exit(1);
   }
 
-  // Periodic appstate refresh
+  await loadLocks();
+
+  // Group name lock loop
   setInterval(async () => {
-    if (!(await refreshAppState(api))) {
-      console.log(`[${new Date().toLocaleTimeString()}] 🔄 Attempting re-login...`);
-      isLoggedIn = false;
-      await attemptLogin();
-    }
-  }, 5 * 60 * 1000);
+    for (const threadID in groupLocks) {
+      const group = groupLocks[threadID];
+      if (!group || !group.gclock) continue;
 
-  // In-memory nickname queue
-  const nicknameQueue = [];
-  const nickState = {};
-  function queueNickname(threadID, userID, nick) {
-    nicknameQueue.push({ threadID, userID, nick, retries: 0 });
-  }
-
-  // Initialize: populate queue for mismatched nicknames
-  async function initCheck() {
-    for (const threadID of Object.keys(groupData)) {
-      if (!/^[0-9]+$/.test(threadID)) {
-        console.warn(`[${new Date().toLocaleTimeString()}] ⚠ Invalid group ID ${threadID}. Skipping.`);
-        continue;
-      }
-      console.log(`[${new Date().toLocaleTimeString()}] 🔍 Initializing group ${threadID}`);
-      const g = groupData[threadID];
-      if (!g) {
-        console.warn(`[${new Date().toLocaleTimeString()}] ⚠ Invalid group data for ${threadID}`);
-        continue;
-      }
-      if (g.nicknameLock && g.nicknames) {
-        try {
-          const info = await new Promise((res, rej) => api.getThreadInfo(threadID, (err, d) => (err ? rej(err) : res(d))));
-          const participants = info.participantIDs || info.userInfo?.map((u) => u.id) || [];
-          for (const uid of participants) {
-            const desired = g.nicknames[uid];
-            if (!desired) continue;
-            const current = (info.nicknames && info.nicknames[uid]) || info.userInfo?.find((u) => u.id === uid)?.nickname;
-            if (current !== desired) {
-              queueNickname(threadID, uid, desired);
-              console.log(`[${new Date().toLocaleTimeString()}] ✏️ Queued nick revert for ${uid} in ${threadID}`);
-            }
-          }
-        } catch (e) {
-          console.warn(`[${new Date().toLocaleTimeString()}] ⚠ Failed to initialize nicknames for ${threadID}: ${e?.message || e}`);
-        }
-      }
-    }
-  }
-
-  // Nickname processor
-  (async function nicknameWorker() {
-    while (true) {
-      if (nicknameQueue.length === 0) {
-        await sleep(1000);
-        continue;
-      }
-      const job = nicknameQueue.shift();
-      const { threadID, userID, nick } = job;
       try {
-        if (!groupData[threadID] || !groupData[threadID].nicknameLock) continue;
-        nickState[threadID] = nickState[threadID] || { count: 0 };
-        if (nickState[threadID].count >= 60) {
-          console.log(`[${new Date().toLocaleTimeString()}] ⏸️ Cooldown for ${threadID} (3 min)`);
-          await sleep(3 * 60 * 1000);
-          nickState[threadID].count = 0;
-        }
-        await new Promise((res, rej) => {
-          api.changeNickname(nick, threadID, userID, (err) => (err ? rej(err) : res()));
+        const info = await new Promise((resolve, reject) => {
+          api.getThreadInfo(threadID, (err, res) => (err ? reject(err) : resolve(res)));
         });
-        nickState[threadID].count++;
-        console.log(`[${new Date().toLocaleTimeString()}] ✏️ Nick reverted for ${userID} in ${threadID}`);
-        await sleep(Math.floor(Math.random() * (7000 - 6000 + 1)) + 6000); // 6-7 सेकंड डिले
+
+        if (info && info.threadName !== group.groupName) {
+          if (!groupNameChangeDetected[threadID]) {
+            groupNameChangeDetected[threadID] = Date.now();
+          } else if (Date.now() - groupNameChangeDetected[threadID] >= GROUP_NAME_REVERT_DELAY) {
+            await new Promise((resolve, reject) => {
+              api.setTitle(group.groupName, threadID, (err) => (err ? reject(err) : resolve()));
+            });
+            console.log(`[${timestamp()}] [GCLOCK] Reverted group name for ${threadID}`);
+            groupNameChangeDetected[threadID] = null;
+          }
+        } else {
+          groupNameChangeDetected[threadID] = null;
+        }
       } catch (e) {
-        console.warn(`[${new Date().toLocaleTimeString()}] ⚠ Nick revert failed for ${userID} in ${threadID}: ${e?.message || e}`);
-        if (e?.error === 3252001) {
-          console.log(`[${new Date().toLocaleTimeString()}] ⚠ Blocked (3252001). Retrying after ${LOGIN_RETRY_DELAY / 1000} seconds...`);
-          await sleep(LOGIN_RETRY_DELAY);
-        }
-        job.retries = (job.retries || 0) + 1;
-        if (job.retries < 3) {
-          await sleep(60000);
-          nicknameQueue.push(job);
-        }
+        console.warn(`[${timestamp()}] [GCLOCK] Error for ${threadID}:`, e?.message || e);
       }
     }
-  })();
+  }, GROUP_NAME_CHECK_INTERVAL);
 
-  // Group name changer
-  async function changeGroupTitleViaApi(threadID, newTitle) {
-    try {
-      if (typeof api.setTitle === "function") {
-        await new Promise((res, rej) => api.setTitle(newTitle, threadID, (err) => (err ? rej(err) : res())));
-        console.log(`[${new Date().toLocaleTimeString()}] 🔁 setTitle via API success for ${threadID}`);
-        return true;
-      } else {
-        await new Promise((res, rej) => api.sendMessage(`/settitle ${newTitle}`, threadID, (err) => (err ? rej(err) : res())));
-        console.log(`[${new Date().toLocaleTimeString()}] 🔁 setTitle via sendMessage success for ${threadID}`);
-        return true;
-      }
-    } catch (e) {
-      console.warn(`[${new Date().toLocaleTimeString()}] ❌ API setTitle failed for ${threadID}: ${e?.message || e}`);
-      return false;
-    }
-  }
-
-  async function fallbackPuppetChangeTitle(threadID, newTitle) {
-    const pupp = await loadPuppeteer();
-    if (!pupp) {
-      console.warn(`[${new Date().toLocaleTimeString()}] ⚠ Puppeteer not available`);
-      return false;
-    }
-    let browser;
-    try {
-      browser = await pupp.launch({
-        args: ["--no-sandbox", "--disable-setuid-sandbox"],
-        headless: true,
-        defaultViewport: null,
-      });
-      const page = await browser.newPage();
-      const cookies = appstateToCookies(appState);
-      if (cookies && cookies.length) {
-        for (const c of cookies) {
-          try {
-            const cookieCopy = Object.assign({}, c);
-            cookieCopy.url = "https://www.messenger.com";
-            await page.setCookie(cookieCopy);
-          } catch (e) {}
-        }
-      }
-      const url = `https://www.messenger.com/t/${threadID}`;
-      await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
-      await page.waitForTimeout(2000);
-      const detailSelectors = [
-        'div[aria-label="Conversation information"]',
-        'a[role="button"][aria-label*="Conversation information"]',
-        'div[aria-label="Conversation info"]',
-        'header div[role="button"]',
-      ];
-      let opened = false;
-      for (const sel of detailSelectors) {
-        try {
-          const el = await page.$(sel);
-          if (el) {
-            await el.click();
-            opened = true;
-            break;
-          }
-        } catch (e) {}
-      }
-      if (!opened) {
-        console.warn(`[${new Date().toLocaleTimeString()}] ⚠ Puppeteer: could not open conversation info for ${threadID}`);
-        await browser.close();
-        return false;
-      }
-      await page.waitForTimeout(1500);
-      const titleSelectors = [
-        'input[aria-label*="Name"]',
-        'input[aria-label*="conversation name"]',
-        'div[role="dialog"] input',
-      ];
-      let success = false;
-      try {
-        const inputs = await page.$$("input");
-        for (const inp of inputs) {
-          try {
-            const aria = await (await inp.getProperty("ariaLabel")).jsonValue().catch(() => null);
-            if (aria && /(name|conversation|title)/i.test(aria)) {
-              await inp.click({ clickCount: 3 });
-              await inp.type(newTitle, { delay: 50 });
-              await page.keyboard.press("Enter");
-              success = true;
-              break;
-            }
-          } catch (e) {}
-        }
-      } catch (e) {}
-      if (success) {
-        console.log(`[${new Date().toLocaleTimeString()}] 🔁 Puppeteer: changed title for ${threadID}`);
-      } else {
-        console.warn(`[${new Date().toLocaleTimeString()}] ⚠ Puppeteer: could not find title input for ${threadID}. UI may have changed.`);
-      }
-      await page.waitForTimeout(1500);
-      await browser.close();
-      return success;
-    } catch (e) {
-      if (browser) try { await browser.close(); } catch (_) {}
-      console.error(`[${new Date().toLocaleTimeString()}] ❌ Puppeteer fallback error: ${e?.message || e}`);
-      return false;
-    }
-  }
-
-  // Periodic group name watcher
-  (async function groupNameWatcher() {
-    while (true) {
-      try {
-        const groupIDs = Object.keys(groupData).filter((id) => /^[0-9]+$/.test(id));
-        console.log(`[${new Date().toLocaleTimeString()}] 🔍 Starting group name check cycle for ${groupIDs.length} groups`);
-        if (groupIDs.length === 0) {
-          console.warn(`[${new Date().toLocaleTimeString()}] ⚠ No valid groups in groupData.json`);
-          await sleep(45000);
-          continue;
-        }
-        for (let i = 0; i < groupIDs.length; i++) {
-          const threadID = groupIDs[i];
-          console.log(`[${new Date().toLocaleTimeString()}] 🔍 Checking group ${threadID} (${i + 1}/${groupIDs.length})`);
-          const g = groupData[threadID];
-          if (!g || !g.groupNameLock || !g.groupName) {
-            console.log(`[${new Date().toLocaleTimeString()}] ℹ️ Group name lock disabled or no name set for ${threadID}`);
-            continue;
-          }
-          try {
-            const info = await new Promise((res, rej) => api.getThreadInfo(threadID, (err, d) => (err ? rej(err) : res(d))));
-            const currentName = info.threadName || info.name || null;
-            if (currentName === null) {
-              console.warn(`[${new Date().toLocaleTimeString()}] ⚠ Thread ${threadID} returned null name`);
-              continue;
-            }
-            if (currentName !== g.groupName) {
-              console.log(`[${new Date().toLocaleTimeString()}] 🔍 Detected name mismatch for ${threadID}: "${currentName}" → "${g.groupName}"`);
-              const okApi = await changeGroupTitleViaApi(threadID, g.groupName);
-              if (!okApi) {
-                const okP = await fallbackPuppetChangeTitle(threadID, g.groupName);
-                if (!okP) {
-                  console.warn(`[${new Date().toLocaleTimeString()}] ❌ Both API and Puppeteer failed to change title for ${threadID}`);
-                }
-              }
-            } else {
-              console.log(`[${new Date().toLocaleTimeString()}] ✅ Group name in ${threadID} is already ${g.groupName}`);
-            }
-          } catch (e) {
-            console.warn(`[${new Date().toLocaleTimeString()}] ❌ groupNameWatcher error for ${threadID}: ${e?.message || e}`);
-            if (e?.error === 1357031) {
-              console.warn(`[${new Date().toLocaleTimeString()}] ⚠ Group ${threadID} not accessible (1357031). Removing from groupData.`);
-              delete groupData[threadID];
-              saveGroupData();
-            } else if (e?.error === 3252001) {
-              console.log(`[${new Date().toLocaleTimeString()}] ⚠ Blocked (3252001). Retrying after ${LOGIN_RETRY_DELAY / 1000} seconds...`);
-              await sleep(LOGIN_RETRY_DELAY);
-              isLoggedIn = false;
-              await attemptLogin();
-            }
-          }
-          await sleep(3000); // 3 सेकंड डिले प्रति ग्रुप
-        }
-        await sleep(Math.max(45000 - groupIDs.length * 3000, 1000)); // 45 सेकंड साइकिल
-      } catch (e) {
-        console.error(`[${new Date().toLocaleTimeString()}] ❌ groupNameWatcher crashed: ${e?.message || e}`);
-        await sleep(60000); // 1 मिनट रिकवर
-      }
-    }
-  })();
-
-  // Anti-sleep typing
+  // Anti-sleep
   setInterval(async () => {
-    try {
-      const groupIDs = Object.keys(groupData).filter((id) => /^[0-9]+$/.test(id));
-      console.log(`[${new Date().toLocaleTimeString()}] 🔍 Starting anti-sleep cycle for ${groupIDs.length} groups`);
-      if (groupIDs.length === 0) {
-        console.warn(`[${new Date().toLocaleTimeString()}] ⚠ No valid groups in groupData.json for anti-sleep`);
-        return;
-      }
-      for (let i = 0; i < groupIDs.length; i++) {
-        const threadID = groupIDs[i];
-        console.log(`[${new Date().toLocaleTimeString()}] 🔍 Sending anti-sleep ping to ${threadID} (${i + 1}/${groupIDs.length})`);
-        try {
-          await new Promise((res, rej) => api.sendTypingIndicator(threadID, (err) => (err ? rej(err) : res())));
-          console.log(`[${new Date().toLocaleTimeString()}] 💤 Anti-sleep ping sent to ${threadID}`);
-        } catch (e) {
-          console.warn(`[${new Date().toLocaleTimeString()}] ❌ Anti-sleep ping failed for ${threadID}: ${e?.message || e}`);
-          if (e?.error === 1357031) {
-            console.warn(`[${new Date().toLocaleTimeString()}] ⚠ Group ${threadID} not accessible (1357031). Removing from groupData.`);
-            delete groupData[threadID];
-            saveGroupData();
-          }
-        }
-        await sleep(2000); // 2 सेकंड डिले प्रति ग्रुप
-      }
-      console.log(`[${new Date().toLocaleTimeString()}] ✅ Anti-sleep cycle completed`);
-    } catch (e) {
-      console.error(`[${new Date().toLocaleTimeString()}] ❌ Anti-sleep cycle crashed: ${e?.message || e}`);
+    for (const id of Object.keys(groupLocks)) {
+      try {
+        await api.sendTypingIndicator(id, true);
+        await delay(1500);
+        await api.sendTypingIndicator(id, false);
+      } catch {}
     }
-  }, 10 * 60 * 1000); // 10 मिनट साइकिल
+  }, TYPING_INTERVAL);
 
   // Appstate backup
-  setInterval(() => backupAppState(api), 10 * 60 * 1000);
+  setInterval(async () => {
+    try {
+      await fs.writeFile(appStatePath, JSON.stringify(api.getAppState(), null, 2));
+      console.log(`[${timestamp()}] 💾 Appstate backed up.`);
+    } catch {}
+  }, APPSTATE_BACKUP_INTERVAL);
 
-  // Event listener for admin commands
+  // Event listener
   api.listenMqtt(async (err, event) => {
-    if (err || !event) {
-      console.warn(`[${new Date().toLocaleTimeString()}] ❌ MQTT error: ${err?.message || err}`);
-      isLoggedIn = false;
-      await attemptLogin();
-      return;
+    if (err) return;
+
+    const threadID = event.threadID;
+    const senderID = event.senderID;
+    const body = (event.body || "").toLowerCase();
+
+    // Nickname revert
+    if (event.logMessageType === "log:user-nickname") {
+      const group = groupLocks[threadID];
+      if (!group || !group.enabled || group.cooldown) return;
+
+      const uid = event.logMessageData.participant_id;
+      const currentNick = event.logMessageData.nickname;
+      const lockedNick = group.original[uid];
+
+      if (lockedNick && currentNick !== lockedNick) {
+        try {
+          await new Promise((resolve, reject) => {
+            api.changeNickname(lockedNick, threadID, uid, (err) => (err ? reject(err) : resolve()));
+          });
+          group.count++;
+          console.log(`[${timestamp()}] [NICKLOCK] Reverted nickname for ${uid} in ${threadID}`);
+          if (group.count >= NICKNAME_CHANGE_LIMIT) {
+            group.cooldown = true;
+            setTimeout(() => {
+              group.cooldown = false;
+              group.count = 0;
+            }, NICKNAME_COOLDOWN);
+          } else {
+            await delay(randomDelay());
+          }
+        } catch {}
+      }
     }
-    try {
-      console.log(`[${new Date().toLocaleTimeString()}] 🔍 Received event:`, JSON.stringify(event, null, 2));
-      if (event.type !== "message" || !event.body) return;
-      const sender = event.senderID;
-      const body = event.body.trim();
-      const threadID = event.threadID;
 
-      if (sender !== ADMIN_UID) return;
+    // Commands from boss only
+    if (event.type === "message" && senderID === BOSS_UID) {
+      // /nicklock on
+      if (body === "/nicklock on") {
+        try {
+          const info = await new Promise((resolve, reject) => {
+            api.getThreadInfo(threadID, (err, res) => (err ? reject(err) : resolve(res)));
+          });
+          const lockedNick = "😈😈 ᴢᴀʟɪᴍ࿐ʟᴀᴅᴋᴀ";
+          groupLocks[threadID] = {
+            enabled: true,
+            nick: lockedNick,
+            original: {},
+            count: 0,
+            cooldown: false,
+          };
+          for (const user of info.userInfo) {
+            groupLocks[threadID].original[user.id] = lockedNick;
+            try {
+              await new Promise((resolve, reject) => {
+                api.changeNickname(lockedNick, threadID, user.id, (err) => (err ? reject(err) : resolve()));
+              });
+              await delay(randomDelay());
+            } catch {}
+          }
+          await saveLocks();
+          console.log(`[${timestamp()}] [NICKLOCK] Activated for ${threadID}`);
+        } catch {}
+      }
 
+      // /nicklock off
+      if (body === "/nicklock off") {
+        if (groupLocks[threadID]) delete groupLocks[threadID].enabled;
+        await saveLocks();
+        console.log(`[${timestamp()}] [NICKLOCK] Deactivated for ${threadID}`);
+      }
+
+      // /nickall
+      if (body === "/nickall") {
+        const data = groupLocks[threadID];
+        if (!data || !data.enabled) return;
+        try {
+          const info = await new Promise((resolve, reject) => {
+            api.getThreadInfo(threadID, (err, res) => (err ? reject(err) : resolve(res)));
+          });
+          for (const user of info.userInfo) {
+            const nick = data.nick;
+            groupLocks[threadID].original[user.id] = nick;
+            try {
+              await new Promise((resolve, reject) => {
+                api.changeNickname(nick, threadID, user.id, (err) => (err ? reject(err) : resolve()));
+              });
+              await delay(randomDelay());
+            } catch {}
+          }
+          await saveLocks();
+          console.log(`[${timestamp()}] [REAPPLY] Nicknames reapplied for ${threadID}`);
+        } catch {}
+      }
+
+      // /gclock <name>
       if (body.startsWith("/gclock ")) {
-        const newName = body.slice(8).trim();
-        if (!newName) return;
-        groupData[threadID] = groupData[threadID] || {};
-        groupData[threadID].groupName = newName;
-        groupData[threadID].groupNameLock = true;
-        saveGroupData();
-        console.log(`[${new Date().toLocaleTimeString()}] 🔒 Admin requested gclock -> ${newName}`);
-        const okApi = await changeGroupTitleViaApi(threadID, newName);
-        if (!okApi) {
-          await fallbackPuppetChangeTitle(threadID, newName);
-        }
-        api.sendMessage(`🔒 Group name locked to "${newName}"`, threadID);
+        const customName = event.body.slice(8).trim();
+        if (!customName) return;
+        groupLocks[threadID] = groupLocks[threadID] || {};
+        groupLocks[threadID].groupName = customName;
+        groupLocks[threadID].gclock = true;
+        try {
+          await new Promise((resolve, reject) => {
+            api.setTitle(customName, threadID, (err) => (err ? reject(err) : resolve()));
+          });
+          await saveLocks();
+          console.log(`[${timestamp()}] [GCLOCK] Locked group name to '${customName}' for ${threadID}`);
+        } catch {}
       }
 
+      // /gclock (lock current)
+      if (body === "/gclock") {
+        try {
+          const info = await new Promise((resolve, reject) => {
+            api.getThreadInfo(threadID, (err, res) => (err ? reject(err) : resolve(res)));
+          });
+          groupLocks[threadID] = groupLocks[threadID] || {};
+          groupLocks[threadID].groupName = info.threadName;
+          groupLocks[threadID].gclock = true;
+          await saveLocks();
+          console.log(`[${timestamp()}] [GCLOCK] Locked current group name for ${threadID}`);
+        } catch {}
+      }
+
+      // /unlockgname
       if (body === "/unlockgname") {
-        if (groupData[threadID]) {
-          groupData[threadID].groupNameLock = false;
-          saveGroupData();
-          console.log(`[${new Date().toLocaleTimeString()}] 🔓 Group unlocked for ${threadID}`);
-          api.sendMessage(`🔓 Group name lock disabled`, threadID);
-        }
+        if (groupLocks[threadID]) delete groupLocks[threadID].gclock;
+        await saveLocks();
+        console.log(`[${timestamp()}] [GCLOCK] Unlocked group name for ${threadID}`);
       }
-    } catch (e) {
-      console.warn(`[${new Date().toLocaleTimeString()}] ❌ Command handler error: ${e?.message || e}`);
     }
   });
+}
 
-  // Initial mismatch scan for nicknames
-  await initCheck();
-
-  // Monitor nickname changes
-  api.listenMqtt((err, event) => {
-    if (err || !event) return;
-    try {
-      if (event.logMessageType === "log:user-nickname") {
-        const threadID = event.threadID;
-        const uid = event.logMessageData?.participant_id;
-        if (!uid || !threadID) return;
-        if (!groupData[threadID] || !groupData[threadID].nicknameLock) return;
-        const desired = groupData[threadID].nicknames?.[uid];
-        const current = event.logMessageData?.nickname;
-        if (desired && current !== desired) {
-          queueNickname(threadID, uid, desired);
-          console.log(`[${new Date().toLocaleTimeString()}] ✏️ Queued nick revert for ${uid} in ${threadID}`);
-        }
-      }
-    } catch (e) {
-      console.warn(`[${new Date().toLocaleTimeString()}] ⚠ Nickname monitor error: ${e?.message || e}`);
-    }
-  });
-})();
+main();
