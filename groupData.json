@@ -1,11 +1,17 @@
 {
-  "30545122678464961": {
-    "groupName": "🔥 Zalim Group 🔥",
-    "nicknameLock": true,
-    "groupNameLock": true,
-    "nicknames": {
-      "100001234567890": "👑 Don 👑",
-      "100009876543210": "💀 Killer 💀"
-    }
-  }
+  "24137017955931168": { "groupName": "🙄🤔Group1", "nicknames": {}, "groupNameLock": true, "nicknameLock": false },
+  "30545122678464961": { "groupName": "Group2", "nicknames": {}, "groupNameLock": true, "nicknameLock": false },
+  "GROUP_ID_3": { "groupName": "Group3", "nicknames": {}, "groupNameLock": true, "nicknameLock": false },
+  "GROUP_ID_4": { "groupName": "Group4", "nicknames": {}, "groupNameLock": true, "nicknameLock": false },
+  "GROUP_ID_5": { "groupName": "Group5", "nicknames": {}, "groupNameLock": true, "nicknameLock": false },
+  "GROUP_ID_6": { "groupName": "Group6", "nicknames": {}, "groupNameLock": true, "nicknameLock": false },
+  "GROUP_ID_7": { "groupName": "Group7", "nicknames": {}, "groupNameLock": true, "nicknameLock": false },
+  "GROUP_ID_8": { "groupName": "Group8", "nicknames": {}, "groupNameLock": true, "nicknameLock": false },
+  "GROUP_ID_9": { "groupName": "Group9", "nicknames": {}, "groupNameLock": true, "nicknameLock": false },
+  "GROUP_ID_10": { "groupName": "Group10", "nicknames": {}, "groupNameLock": true, "nicknameLock": false },
+  "GROUP_ID_11": { "groupName": "Group11", "nicknames": {}, "groupNameLock": true, "nicknameLock": false },
+  "GROUP_ID_12": { "groupName": "Group12", "nicknames": {}, "groupNameLock": true, "nicknameLock": false },
+  "GROUP_ID_13": { "groupName": "Group13", "nicknames": {}, "groupNameLock": true, "nicknameLock": false },
+  "GROUP_ID_14": { "groupName": "Group14", "nicknames": {}, "groupNameLock": true, "nicknameLock": false },
+  "GROUP_ID_15": { "groupName": "Group15", "nicknames": {}, "groupNameLock": true, "nicknameLock": false }
 }
