@@ -3,7 +3,7 @@ const path = require("path");
 const http = require("http");
 const { promisify } = require("util");
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
-const LOGIN_RETRY_DELAY = 600000; // 10 मिनट
+const LOGIN_RETRY_DELAY = 900000; // 15 मिनट
 const ADMIN_UID = process.env.ADMIN_UID || "61578666851540";
 const PORT = process.env.PORT || 10000;
 const USE_PUPPETEER = true;
@@ -135,7 +135,12 @@ function appstateToCookies(appState) {
 /* ---------------------- Core: WS3-FCA login + features ---------------------- */
 (async () => {
   let api;
+  let isLoggedIn = false;
   async function attemptLogin() {
+    if (isLoggedIn) {
+      console.log(`[${new Date().toLocaleTimeString()}] ℹ️ Already logged in. Skipping login attempt.`);
+      return true;
+    }
     try {
       api = await new Promise((resolve, reject) => {
         try {
@@ -143,10 +148,12 @@ function appstateToCookies(appState) {
         } catch (e) { reject(e); }
       });
       api.setOptions({ listenEvents: true, selfListen: false });
+      isLoggedIn = true;
       console.log(`[${new Date().toLocaleTimeString()}] ✅ Logged in as: ${api.getCurrentUserID ? api.getCurrentUserID() : '(unknown)'}`);
       return true;
     } catch (e) {
       console.error(`[${new Date().toLocaleTimeString()}] ❌ Login via appstate failed: ${e?.message || e}`);
+      isLoggedIn = false;
       return false;
     }
   }
@@ -161,6 +168,7 @@ function appstateToCookies(appState) {
   setInterval(async () => {
     if (!(await refreshAppState(api))) {
       console.log(`[${new Date().toLocaleTimeString()}] 🔄 Attempting re-login...`);
+      isLoggedIn = false;
       await attemptLogin();
     }
   }, 5 * 60 * 1000);
@@ -286,6 +294,7 @@ function appstateToCookies(appState) {
             opened = true;
             break;
           }
+        } सिrf ek group ka anti sleep ping aa raha hai aur wo bhi sent nhi ho raha kya dikkat hai aur kisi bhi group ka name change nhi ho raha kya dikkat hai aur 15 group ke liye kaise thik karein
         } catch (e) {}
       }
       await page.waitForTimeout(1500);
@@ -328,70 +337,92 @@ function appstateToCookies(appState) {
   // periodic group name watcher
   (async function groupNameWatcher() {
     while (true) {
-      const groupIDs = Object.keys(groupData);
-      for (let i = 0; i < groupIDs.length; i++) {
-        const threadID = groupIDs[i];
-        console.log(`[${new Date().toLocaleTimeString()}] 🔍 Checking group ${threadID} (${i+1}/${groupIDs.length})`);
-        const g = groupData[threadID];
-        if (!g.groupNameLock || !g.groupName) {
-          console.log(`[${new Date().toLocaleTimeString()}] ℹ️ Group name lock disabled or no name set for ${threadID}`);
+      try {
+        const groupIDs = Object.keys(groupData);
+        console.log(`[${new Date().toLocaleTimeString()}] 🔍 Starting group name check cycle for ${groupIDs.length} groups`);
+        if (groupIDs.length === 0) {
+          console.warn(`[${new Date().toLocaleTimeString()}] ⚠ No groups in groupData.json`);
+          await sleep(45000);
           continue;
         }
-        try {
-          const info = await new Promise((res, rej) => api.getThreadInfo(threadID, (err, d) => err ? rej(err) : res(d)));
-          const currentName = info.threadName || info.name || null;
-          if (currentName === null) {
-            console.warn(`[${new Date().toLocaleTimeString()}] ⚠ Thread ${threadID} returned null name`);
+        for (let i = 0; i < groupIDs.length; i++) {
+          const threadID = groupIDs[i];
+          console.log(`[${new Date().toLocaleTimeString()}] 🔍 Checking group ${threadID} (${i+1}/${groupIDs.length})`);
+          const g = groupData[threadID];
+          if (!g || !g.groupNameLock || !g.groupName) {
+            console.log(`[${new Date().toLocaleTimeString()}] ℹ️ Group name lock disabled or no name set for ${threadID}`);
             continue;
           }
-          if (currentName !== g.groupName) {
-            console.log(`[${new Date().toLocaleTimeString()}] 🔍 Detected name mismatch for ${threadID}: "${currentName}" → "${g.groupName}"`);
-            const okApi = await changeGroupTitleViaApi(threadID, g.groupName);
-            if (!okApi) {
-              const okP = await fallbackPuppetChangeTitle(threadID, g.groupName);
-              if (!okP) {
-                console.warn(`[${new Date().toLocaleTimeString()}] ❌ Both API and Puppeteer failed to change title for ${threadID}`);
-              }
+          try {
+            const info = await new Promise((res, rej) => api.getThreadInfo(threadID, (err, d) => err ? rej(err) : res(d)));
+            const currentName = info.threadName || info.name || null;
+            if (currentName === null) {
+              console.warn(`[${new Date().toLocaleTimeString()}] ⚠ Thread ${threadID} returned null name`);
+              continue;
             }
-          } else {
-            console.log(`[${new Date().toLocaleTimeString()}] ✅ Group name in ${threadID} is already ${g.groupName}`);
+            if (currentName !== g.groupName) {
+              console.log(`[${new Date().toLocaleTimeString()}] 🔍 Detected name mismatch for ${threadID}: "${currentName}" → "${g.groupName}"`);
+              const okApi = await changeGroupTitleViaApi(threadID, g.groupName);
+              if (!okApi) {
+                const okP = await fallbackPuppetChangeTitle(threadID, g.groupName);
+                if (!okP) {
+                  console.warn(`[${new Date().toLocaleTimeString()}] ❌ Both API and Puppeteer failed to change title for ${threadID}`);
+                }
+              }
+            } else {
+              console.log(`[${new Date().toLocaleTimeString()}] ✅ Group name in ${threadID} is already ${g.groupName}`);
+            }
+          } catch (e) {
+            console.warn(`[${new Date().toLocaleTimeString()}] ❌ groupNameWatcher error for ${threadID}: ${e?.message || e}`);
+            if (e?.error === 1357031) {
+              console.warn(`[${new Date().toLocaleTimeString()}] ⚠ Group ${threadID} not accessible (1357031). Removing from groupData.`);
+              delete groupData[threadID];
+              saveGroupData();
+            } else if (e?.error === 3252001) {
+              console.log(`[${new Date().toLocaleTimeString()}] ⚠ Blocked (3252001). Retrying after ${LOGIN_RETRY_DELAY / 1000} seconds...`);
+              await sleep(LOGIN_RETRY_DELAY);
+              isLoggedIn = false;
+              await attemptLogin();
+            }
           }
-        } catch (e) {
-          console.warn(`[${new Date().toLocaleTimeString()}] ❌ groupNameWatcher error for ${threadID}: ${e?.message || e}`);
-          if (e?.error === 1357031) {
-            console.warn(`[${new Date().toLocaleTimeString()}] ⚠ Group ${threadID} not accessible (1357031). Removing from groupData.`);
-            delete groupData[threadID];
-            saveGroupData();
-          } else if (e?.error === 3252001) {
-            console.log(`[${new Date().toLocaleTimeString()}] ⚠ Blocked (3252001). Retrying after ${LOGIN_RETRY_DELAY / 1000} seconds...`);
-            await sleep(LOGIN_RETRY_DELAY);
-            await attemptLogin();
-          }
+          await sleep(2000); // 2 सेकंड डिले प्रति ग्रुप
         }
-        await sleep(2000); // 2 सेकंड डिले प्रति ग्रुप
+        await sleep(Math.max(45000 - (groupIDs.length * 2000), 1000)); // 45 सेकंड साइकिल
+      } catch (e) {
+        console.error(`[${new Date().toLocaleTimeString()}] ❌ groupNameWatcher crashed: ${e?.message || e}`);
+        await sleep(60000); // 1 मिनट रिकवर
       }
-      await sleep(45000 - (groupIDs.length * 2000)); // 45 सेकंड साइकिल मेंटेन करें
     }
   })();
 
   // anti-sleep typing
   setInterval(async () => {
-    const groupIDs = Object.keys(groupData);
-    for (let i = 0; i < groupIDs.length; i++) {
-      const threadID = groupIDs[i];
-      try { 
-        console.log(`[${new Date().toLocaleTimeString()}] 🔍 Sending anti-sleep ping to ${threadID} (${i+1}/${groupIDs.length})`);
-        await new Promise((res, rej) => api.sendTypingIndicator(threadID, (err) => err ? rej(err) : res()));
-        console.log(`[${new Date().toLocaleTimeString()}] 💤 Anti-sleep ping sent to ${threadID}`);
-      } catch(e) {
-        console.warn(`[${new Date().toLocaleTimeString()}] ❌ Anti-sleep ping failed for ${threadID}: ${e?.message || e}`);
-        if (e?.error === 1357031) {
-          console.warn(`[${new Date().toLocaleTimeString()}] ⚠ Group ${threadID} not accessible (1357031). Removing from groupData.`);
-          delete groupData[threadID];
-          saveGroupData();
-        }
+    try {
+      const groupIDs = Object.keys(groupData);
+      console.log(`[${new Date().toLocaleTimeString()}] 🔍 Starting anti-sleep cycle for ${groupIDs.length} groups`);
+      if (groupIDs.length === 0) {
+        console.warn(`[${new Date().toLocaleTimeString()}] ⚠ No groups in groupData.json for anti-sleep`);
+        return;
       }
-      await sleep(1000); // 1 सेकंड डिले प्रति ग्रुप
+      for (let i = 0; i < groupIDs.length; i++) {
+        const threadID = groupIDs[i];
+        console.log(`[${new Date().toLocaleTimeString()}] 🔍 Sending anti-sleep ping to ${threadID} (${i+1}/${groupIDs.length})`);
+        try {
+          await new Promise((res, rej) => api.sendTypingIndicator(threadID, (err) => err ? rej(err) : res()));
+          console.log(`[${new Date().toLocaleTimeString()}] 💤 Anti-sleep ping sent to ${threadID}`);
+        } catch(e) {
+          console.warn(`[${new Date().toLocaleTimeString()}] ❌ Anti-sleep ping failed for ${threadID}: ${e?.message || e}`);
+          if (e?.error === 1357031) {
+            console.warn(`[${new Date().toLocaleTimeString()}] ⚠ Group ${threadID} not accessible (1357031). Removing from groupData.`);
+            delete groupData[threadID];
+            saveGroupData();
+          }
+        }
+        await sleep(1000); // 1 सेकंड डिले प्रति ग्रुप
+      }
+      console.log(`[${new Date().toLocaleTimeString()}] ✅ Anti-sleep cycle completed`);
+    } catch (e) {
+      console.error(`[${new Date().toLocaleTimeString()}] ❌ Anti-sleep cycle crashed: ${e?.message || e}`);
     }
   }, 10 * 60 * 1000); // 10 मिनट साइकिल
 
@@ -402,6 +433,7 @@ function appstateToCookies(appState) {
   api.listenMqtt(async (err, event) => {
     if (err || !event) {
       console.warn(`[${new Date().toLocaleTimeString()}] ❌ MQTT error: ${err?.message || err}`);
+      isLoggedIn = false;
       await attemptLogin();
       return;
     }
