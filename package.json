@@ -1,14 +1,28 @@
+
 {
-  "name": "fb-group-lock-bot",
+  "name": "fb-messenger-bot",
   "version": "1.0.0",
-  "description": "Facebook Group Nickname & Name Lock Bot with Puppeteer Keep-Alive",
+  "description": "Facebook Messenger Group Lock Bot using ws3-fca",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
-    "puppeteer": "^22.6.5",
-    "ws3-fca": "latest"
-  }
+    "express": "^4.18.2",
+    "ws3-fca": "^1.0.0",
+    "npmlog": "^6.0.2"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "keywords": [
+    "facebook",
+    "messenger",
+    "bot",
+    "group-lock",
+    "nickname-lock",
+    "ws3-fca"
+  ],
+  "author": "Anu",
+  "license": "MIT"
 }
