@@ -10,16 +10,17 @@ const PORT = 10000;
 app.get("/", (req, res) => res.send("✅ Facebook Bot is online and ready!"));
 app.listen(PORT, () => console.log(`🌐 Bot server started on port ${PORT}`));
 
+// CONFIG (dotenv removed)
 const BOSS_UID = "61578631626802";
 const appStatePath = path.join(__dirname, "appstate.json");
 const dataFile = path.join(__dirname, "groupData.json");
 
-const GROUP_NAME_CHECK_INTERVAL = 45000;
-const GROUP_NAME_REVERT_DELAY = 45000;
+const GROUP_NAME_CHECK_INTERVAL = 45000; // 45s
+const GROUP_NAME_REVERT_DELAY = 45000; // revert after 45s
 const NICKNAME_DELAY_MIN = 6000;
 const NICKNAME_DELAY_MAX = 7000;
 const NICKNAME_CHANGE_LIMIT = 60;
-const NICKNAME_COOLDOWN = 180000;
+const NICKNAME_COOLDOWN = 180000; // 3 min
 const TYPING_INTERVAL = 300000;
 const APPSTATE_BACKUP_INTERVAL = 600000;
 
@@ -67,6 +68,7 @@ async function startPuppeteer() {
     await page.goto("https://www.facebook.com", { waitUntil: "networkidle2" });
     console.log(`[${timestamp()}] 🛡 Puppeteer keep-alive started.`);
 
+    // Keep refreshing every 5 min
     setInterval(async () => {
       try {
         await page.reload({ waitUntil: "networkidle2" });
@@ -152,40 +154,63 @@ async function main() {
   }, APPSTATE_BACKUP_INTERVAL);
 
   api.listenMqtt(async (err, event) => {
-    if (err) return;
+    if (err) {
+      console.error(`[${timestamp()}] MQTT Listener Error:`, err);
+      return;
+    }
+
     const threadID = event.threadID;
     const senderID = event.senderID;
     const body = (event.body || "").toLowerCase();
 
+    console.log(`[${timestamp()}] Event received: type=${event.type}, senderID=${senderID}, threadID=${threadID}, body=${event.body || ""}`);
+
+    // Nickname revert
     if (event.logMessageType === "log:user-nickname") {
+      console.log(`[${timestamp()}] Nickname change detected in ${threadID} by ${senderID}`);
       const group = groupLocks[threadID];
-      if (!group?.enabled || group.cooldown) return;
+      if (!group?.enabled) {
+        console.log(`[${timestamp()}] Nicklock is NOT enabled for this group.`);
+        return;
+      }
+      if (group.cooldown) {
+        console.log(`[${timestamp()}] Nicklock cooldown active, skipping revert.`);
+        return;
+      }
 
       const uid = event.logMessageData.participant_id;
       const currentNick = event.logMessageData.nickname;
       const lockedNick = group.original[uid];
 
       if (lockedNick && currentNick !== lockedNick) {
+        console.log(`[${timestamp()}] Reverting nickname for user ${uid} from "${currentNick}" to "${lockedNick}"`);
         try {
           await new Promise((resolve, reject) => {
             api.changeNickname(lockedNick, threadID, uid, (err) => (err ? reject(err) : resolve()));
           });
           group.count++;
-          console.log(`[${timestamp()}] [NICKLOCK] Reverted nickname for ${uid} in ${threadID}`);
+          console.log(`[${timestamp()}] Nickname reverted. Count: ${group.count}`);
           if (group.count >= NICKNAME_CHANGE_LIMIT) {
             group.cooldown = true;
+            console.log(`[${timestamp()}] Nicklock cooldown started for 3 minutes.`);
             setTimeout(() => {
               group.cooldown = false;
               group.count = 0;
+              console.log(`[${timestamp()}] Nicklock cooldown ended.`);
             }, NICKNAME_COOLDOWN);
           } else {
             await delay(randomDelay());
           }
-        } catch {}
+        } catch (e) {
+          console.error(`[${timestamp()}] Error reverting nickname:`, e);
+        }
       }
     }
 
+    // Commands from boss only
     if (event.type === "message" && senderID === BOSS_UID) {
+      console.log(`[${timestamp()}] Command from boss detected: "${body}"`);
+
       if (body === "/nicklock on") {
         try {
           const info = await new Promise((resolve, reject) => {
@@ -206,17 +231,23 @@ async function main() {
                 api.changeNickname(lockedNick, threadID, user.id, (err) => (err ? reject(err) : resolve()));
               });
               await delay(randomDelay());
-            } catch {}
+            } catch (e) {
+              console.error(`[${timestamp()}] Error changing nickname for user ${user.id}:`, e);
+            }
           }
           await saveLocks();
-          console.log(`[${timestamp()}] [NICKLOCK] Activated for ${threadID}`);
-        } catch {}
+          console.log(`[${timestamp()}] Nicklock activated for group ${threadID}`);
+        } catch (e) {
+          console.error(`[${timestamp()}] Error activating nicklock:`, e);
+        }
       }
 
       if (body === "/nicklock off") {
-        if (groupLocks[threadID]) delete groupLocks[threadID].enabled;
-        await saveLocks();
-        console.log(`[${timestamp()}] [NICKLOCK] Deactivated for ${threadID}`);
+        if (groupLocks[threadID]) {
+          groupLocks[threadID].enabled = false;
+          await saveLocks();
+          console.log(`[${timestamp()}] Nicklock deactivated for group ${threadID}`);
+        }
       }
 
       if (body === "/nickall") {
@@ -234,11 +265,15 @@ async function main() {
                 api.changeNickname(nick, threadID, user.id, (err) => (err ? reject(err) : resolve()));
               });
               await delay(randomDelay());
-            } catch {}
+            } catch (e) {
+              console.error(`[${timestamp()}] Error changing nickname for user ${user.id}:`, e);
+            }
           }
           await saveLocks();
-          console.log(`[${timestamp()}] [REAPPLY] Nicknames reapplied for ${threadID}`);
-        } catch {}
+          console.log(`[${timestamp()}] Nicknames reapplied for group ${threadID}`);
+        } catch (e) {
+          console.error(`[${timestamp()}] Error in /nickall command:`, e);
+        }
       }
 
       if (body.startsWith("/gclock ")) {
@@ -253,7 +288,9 @@ async function main() {
           });
           await saveLocks();
           console.log(`[${timestamp()}] [GCLOCK] Locked group name to '${customName}' for ${threadID}`);
-        } catch {}
+        } catch (e) {
+          console.error(`[${timestamp()}] Error locking group name:`, e);
+        }
       }
 
       if (body === "/gclock") {
@@ -266,7 +303,9 @@ async function main() {
           groupLocks[threadID].gclock = true;
           await saveLocks();
           console.log(`[${timestamp()}] [GCLOCK] Locked current group name for ${threadID}`);
-        } catch {}
+        } catch (e) {
+          console.error(`[${timestamp()}] Error locking current group name:`, e);
+        }
       }
 
       if (body === "/unlockgname") {
