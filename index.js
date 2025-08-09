@@ -24,19 +24,31 @@ try {
   }
 }
 
-// Load appstate
+// Load and validate appstate
 let appState;
 const appStatePath = path.join(__dirname, "appstate.json");
 if (process.env.APPSTATE_JSON) {
   try {
-    appState = JSON.parse(process.env.APPSTATE_JSON);
+    const parsed = JSON.parse(process.env.APPSTATE_JSON);
+    if (Array.isArray(parsed) && parsed.every(item => item.key && item.value && item.domain)) {
+      appState = parsed;
+    } else {
+      console.error(`[${new Date().toLocaleTimeString()}] ❌ APPSTATE_JSON is not a valid appstate array`);
+      process.exit(1);
+    }
   } catch (e) {
     console.error(`[${new Date().toLocaleTimeString()}] ❌ Failed to parse APPSTATE_JSON env var: ${e.message}`);
     process.exit(1);
   }
 } else if (fs.existsSync(appStatePath)) {
   try {
-    appState = JSON.parse(fs.readFileSync(appStatePath, "utf8"));
+    const parsed = JSON.parse(fs.readFileSync(appStatePath, "utf8"));
+    if (Array.isArray(parsed) && parsed.every(item => item.key && item.value && item.domain)) {
+      appState = parsed;
+    } else {
+      console.error(`[${new Date().toLocaleTimeString()}] ❌ appstate.json is not a valid appstate array`);
+      process.exit(1);
+    }
   } catch (e) {
     console.error(`[${new Date().toLocaleTimeString()}] ❌ Failed to read appstate.json: ${e.message}`);
     process.exit(1);
@@ -80,8 +92,10 @@ async function backupAppState(api) {
   try {
     if (api && api.getAppState) {
       const s = api.getAppState();
-      fs.writeFileSync(appStatePath, JSON.stringify(s, null, 2));
-      console.log(`[${new Date().toLocaleTimeString()}] 💾 Appstate backed up`);
+      if (Array.isArray(s) && s.every(item => item.key && item.value && item.domain)) {
+        fs.writeFileSync(appStatePath, JSON.stringify(s, null, 2));
+        console.log(`[${new Date().toLocaleTimeString()}] 💾 Appstate backed up`);
+      }
     }
   } catch (e) {
     console.warn(`[${new Date().toLocaleTimeString()}] ⚠ Appstate backup failed: ${e.message}`);
@@ -92,7 +106,7 @@ async function refreshAppState(api) {
   try {
     console.log(`[${new Date().toLocaleTimeString()}] 🔄 Refreshing appstate...`);
     const newAppState = api.getAppState();
-    if (newAppState && Array.isArray(newAppState)) {
+    if (Array.isArray(newAppState) && newAppState.every(item => item.key && item.value && item.domain)) {
       appState = newAppState;
       fs.writeFileSync(appStatePath, JSON.stringify(appState, null, 2));
       console.log(`[${new Date().toLocaleTimeString()}] ✅ Appstate refreshed and saved`);
@@ -126,14 +140,10 @@ function appstateToCookies(appState) {
     if (Array.isArray(appState)) {
       for (const kv of appState) {
         if (kv && typeof kv === "object") {
-          if (kv.name && kv.value) {
-            cookies.push({ name: kv.name, value: kv.value, domain: ".facebook.com", path: "/", httpOnly: false, secure: true });
-          } else if (kv.key && kv.value) {
-            cookies.push({ name: kv.key, value: kv.value, domain: ".facebook.com", path: "/", httpOnly: false, secure: true });
-          } else if (kv.cookies && Array.isArray(kv.cookies)) {
-            for (const c of kv.cookies) cookies.push(Object.assign({ domain: ".facebook.com", path: "/" }, c));
+          if (kv.key && kv.value && kv.domain) {
+            cookies.push({ name: kv.key, value: kv.value, domain: kv.domain, path: "/", httpOnly: false, secure: true });
           } else if (kv.name && kv.value && kv.domain) {
-            cookies.push(Object.assign({ path: "/" }, kv));
+            cookies.push({ name: kv.name, value: kv.value, domain: kv.domain, path: "/", httpOnly: false, secure: true });
           }
         }
       }
@@ -206,6 +216,10 @@ function appstateToCookies(appState) {
   // Initialize: populate queue for mismatched nicknames
   async function initCheck() {
     for (const threadID of Object.keys(groupData)) {
+      if (!/^[0-9]+$/.test(threadID)) {
+        console.warn(`[${new Date().toLocaleTimeString()}] ⚠ Invalid group ID ${threadID}. Skipping.`);
+        continue;
+      }
       console.log(`[${new Date().toLocaleTimeString()}] 🔍 Initializing group ${threadID}`);
       const g = groupData[threadID];
       if (!g) {
@@ -401,140 +415,4 @@ function appstateToCookies(appState) {
               continue;
             }
             if (currentName !== g.groupName) {
-              console.log(`[${new Date().toLocaleTimeString()}] 🔍 Detected name mismatch for ${threadID}: "${currentName}" → "${g.groupName}"`);
-              const okApi = await changeGroupTitleViaApi(threadID, g.groupName);
-              if (!okApi) {
-                const okP = await fallbackPuppetChangeTitle(threadID, g.groupName);
-                if (!okP) {
-                  console.warn(`[${new Date().toLocaleTimeString()}] ❌ Both API and Puppeteer failed to change title for ${threadID}`);
-                }
-              }
-            } else {
-              console.log(`[${new Date().toLocaleTimeString()}] ✅ Group name in ${threadID} is already ${g.groupName}`);
-            }
-          } catch (e) {
-            console.warn(`[${new Date().toLocaleTimeString()}] ❌ groupNameWatcher error for ${threadID}: ${e?.message || e}`);
-            if (e?.error === 1357031) {
-              console.warn(`[${new Date().toLocaleTimeString()}] ⚠ Group ${threadID} not accessible (1357031). Removing from groupData.`);
-              delete groupData[threadID];
-              saveGroupData();
-            } else if (e?.error === 3252001) {
-              console.log(`[${new Date().toLocaleTimeString()}] ⚠ Blocked (3252001). Retrying after ${LOGIN_RETRY_DELAY / 1000} seconds...`);
-              await sleep(LOGIN_RETRY_DELAY);
-              isLoggedIn = false;
-              await attemptLogin();
-            }
-          }
-          await sleep(3000); // 3 सेकंड डिले प्रति ग्रुप
-        }
-        await sleep(Math.max(45000 - groupIDs.length * 3000, 1000)); // 45 सेकंड साइकिल
-      } catch (e) {
-        console.error(`[${new Date().toLocaleTimeString()}] ❌ groupNameWatcher crashed: ${e?.message || e}`);
-        await sleep(60000); // 1 मिनट रिकवर
-      }
-    }
-  })();
-
-  // Anti-sleep typing
-  setInterval(async () => {
-    try {
-      const groupIDs = Object.keys(groupData).filter((id) => /^[0-9]+$/.test(id));
-      console.log(`[${new Date().toLocaleTimeString()}] 🔍 Starting anti-sleep cycle for ${groupIDs.length} groups`);
-      if (groupIDs.length === 0) {
-        console.warn(`[${new Date().toLocaleTimeString()}] ⚠ No valid groups in groupData.json for anti-sleep`);
-        return;
-      }
-      for (let i = 0; i < groupIDs.length; i++) {
-        const threadID = groupIDs[i];
-        console.log(`[${new Date().toLocaleTimeString()}] 🔍 Sending anti-sleep ping to ${threadID} (${i + 1}/${groupIDs.length})`);
-        try {
-          await new Promise((res, rej) => api.sendTypingIndicator(threadID, (err) => (err ? rej(err) : res())));
-          console.log(`[${new Date().toLocaleTimeString()}] 💤 Anti-sleep ping sent to ${threadID}`);
-        } catch (e) {
-          console.warn(`[${new Date().toLocaleTimeString()}] ❌ Anti-sleep ping failed for ${threadID}: ${e?.message || e}`);
-          if (e?.error === 1357031) {
-            console.warn(`[${new Date().toLocaleTimeString()}] ⚠ Group ${threadID} not accessible (1357031). Removing from groupData.`);
-            delete groupData[threadID];
-            saveGroupData();
-          }
-        }
-        await sleep(2000); // 2 सेकंड डिले प्रति ग्रुप
-      }
-      console.log(`[${new Date().toLocaleTimeString()}] ✅ Anti-sleep cycle completed`);
-    } catch (e) {
-      console.error(`[${new Date().toLocaleTimeString()}] ❌ Anti-sleep cycle crashed: ${e?.message || e}`);
-    }
-  }, 10 * 60 * 1000); // 10 मिनट साइकिल
-
-  // Appstate backup
-  setInterval(() => backupAppState(api), 10 * 60 * 1000);
-
-  // Event listener for admin commands
-  api.listenMqtt(async (err, event) => {
-    if (err || !event) {
-      console.warn(`[${new Date().toLocaleTimeString()}] ❌ MQTT error: ${err?.message || err}`);
-      isLoggedIn = false;
-      await attemptLogin();
-      return;
-    }
-    try {
-      console.log(`[${new Date().toLocaleTimeString()}] 🔍 Received event:`, JSON.stringify(event, null, 2));
-      if (event.type !== "message" || !event.body) return;
-      const sender = event.senderID;
-      const body = event.body.trim();
-      const threadID = event.threadID;
-
-      if (sender !== ADMIN_UID) return;
-
-      if (body.startsWith("/gclock ")) {
-        const newName = body.slice(8).trim();
-        if (!newName) return;
-        groupData[threadID] = groupData[threadID] || {};
-        groupData[threadID].groupName = newName;
-        groupData[threadID].groupNameLock = true;
-        saveGroupData();
-        console.log(`[${new Date().toLocaleTimeString()}] 🔒 Admin requested gclock -> ${newName}`);
-        const okApi = await changeGroupTitleViaApi(threadID, newName);
-        if (!okApi) {
-          await fallbackPuppetChangeTitle(threadID, newName);
-        }
-        api.sendMessage(`🔒 Group name locked to "${newName}"`, threadID);
-      }
-
-      if (body === "/unlockgname") {
-        if (groupData[threadID]) {
-          groupData[threadID].groupNameLock = false;
-          saveGroupData();
-          console.log(`[${new Date().toLocaleTimeString()}] 🔓 Group unlocked for ${threadID}`);
-          api.sendMessage(`🔓 Group name lock disabled`, threadID);
-        }
-      }
-    } catch (e) {
-      console.warn(`[${new Date().toLocaleTimeString()}] ❌ Command handler error: ${e?.message || e}`);
-    }
-  });
-
-  // Initial mismatch scan for nicknames
-  await initCheck();
-
-  // Monitor nickname changes
-  api.listenMqtt((err, event) => {
-    if (err || !event) return;
-    try {
-      if (event.logMessageType === "log:user-nickname") {
-        const threadID = event.threadID;
-        const uid = event.logMessageData?.participant_id;
-        if (!uid || !threadID) return;
-        if (!groupData[threadID] || !groupData[threadID].nicknameLock) return;
-        const desired = groupData[threadID].nicknames?.[uid];
-        const current = event.logMessageData?.nickname;
-        if (desired && current !== desired) {
-          queueNickname(threadID, uid, desired);
-          console.log(`[${new Date().toLocaleTimeString()}] ✏️ Queued nick revert for ${uid} in ${threadID}`);
-        }
-      }
-    } catch (e) {
-      console.warn(`[${new Date().toLocaleTimeString()}] ⚠ Nickname monitor error: ${e?.message || e}`);
-    }
-  });
-})();
+              console.log(`[${new Date().toLocaleTimeString()}] 🔍 Detected name
