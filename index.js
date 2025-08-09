@@ -96,7 +96,7 @@ async function main() {
         });
         if (info && info.threadName !== group.groupName) {
           await new Promise((resolve, reject) => {
-            api.changeThreadTitle(group.groupName, threadID, (err) => (err ? reject(err) : resolve()));
+            api.setTitle(group.groupName, threadID, (err) => (err ? reject(err) : resolve())); // Changed here
           });
           console.log(`[${timestamp()}] [GCLOCK] Reverted group name for ${threadID}`);
         }
@@ -210,7 +210,7 @@ async function main() {
         groupLocks[threadID].gclock = true;
         try {
           await new Promise((resolve, reject) => {
-            api.changeThreadTitle(customName, threadID, (err) => (err ? reject(err) : resolve()));
+            api.setTitle(customName, threadID, (err) => (err ? reject(err) : resolve())); // Changed here
           });
           await saveLocks();
           console.log(`[${timestamp()}] [GCLOCK] Locked group name to '${customName}' for ${threadID}`);
