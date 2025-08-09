@@ -1,74 +1,67 @@
 const fs = require("fs");
-const express = require("express");
 const login = require("ws3-fca");
-
+const express = require("express");
 const app = express();
-const port = process.env.PORT || 10000;
+const path = require("path");
 
-// Load appState and group config
-const appStateFile = "appstate.json";
-const groupDataFile = "data.json";
+const DATA_FILE = path.join(__dirname, "data.json");
+const APPSTATE_FILE = path.join(__dirname, "appstate.json");
 
-let groupData = JSON.parse(fs.readFileSync(groupDataFile, "utf8"));
+// Agar data.json missing hai to default file banado
+if (!fs.existsSync(DATA_FILE)) {
+    fs.writeFileSync(DATA_FILE, JSON.stringify({}, null, 2));
+    console.log("📂 data.json file created!");
+}
 
-// Create HTTP server for Render
-app.get("/", (req, res) => {
-  res.send("Facebook Group Bot is running!");
-});
+// Agar appstate.json missing hai to error
+if (!fs.existsSync(APPSTATE_FILE)) {
+    console.error("❌ Missing appstate.json! Please upload your Appstate file.");
+    process.exit(1);
+}
 
-app.listen(port, () => {
-  console.log(`[HTTP] Server running on port ${port}`);
-});
+let groupData = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
 
-// Login
-login({ appState: JSON.parse(fs.readFileSync(appStateFile, "utf8")) }, (err, api) => {
-  if (err) return console.error(err);
+function saveData() {
+    fs.writeFileSync(DATA_FILE, JSON.stringify(groupData, null, 2));
+}
 
-  console.log("[BOT] Logged in successfully!");
+// Express server (Render alive rakhega)
+app.get("/", (req, res) => res.send("✅ Bot is running..."));
+app.listen(10000, () => console.log("🌐 HTTP server running on port 10000"));
 
-  api.setOptions({
-    listenEvents: true,
-    selfListen: false
-  });
-
-  api.listenMqtt((err, event) => {
+// Facebook login
+login({ appState: JSON.parse(fs.readFileSync(APPSTATE_FILE, "utf8")) }, (err, api) => {
     if (err) return console.error(err);
 
-    // Group name change detection
-    if (event.type === "log:subscribe" || event.type === "log:unsubscribe") return;
+    console.log("✅ Bot logged in successfully!");
 
-    if (event.type === "event") {
-      // Group name change
-      if (event.logMessageType === "log:thread-name") {
-        const groupId = event.threadID;
-        if (groupData[groupId] && groupData[groupId].groupNameLock) {
-          const desiredName = groupData[groupId].groupName;
-          if (event.logMessageData.name !== desiredName) {
-            console.log(`[GroupNameLock] Reverting name in group ${groupId}...`);
-            api.setTitle(desiredName, groupId, (err) => {
-              if (err) console.error(err);
-            });
-          }
+    api.listenMqtt((err, event) => {
+        if (err) return console.error(err);
+
+        // Group Name Change
+        if (event.type === "event" && event.logMessageType === "log:thread-name") {
+            let groupID = event.threadID;
+            if (groupData[groupID]?.groupNameLock) {
+                setTimeout(() => {
+                    api.setTitle(groupData[groupID].groupName, groupID, (err) => {
+                        if (!err) console.log(`🔒 Group name reset: ${groupData[groupID].groupName}`);
+                    });
+                }, 45000); // 45 second delay
+            }
         }
-      }
 
-      // Nickname change
-      if (event.logMessageType === "log:user-nickname") {
-        const groupId = event.threadID;
-        if (groupData[groupId] && groupData[groupId].nicknameLock) {
-          const userId = event.logMessageData.participant_id;
-          const desiredNickname = groupData[groupId].nicknames[userId];
-
-          if (desiredNickname && event.logMessageData.nickname !== desiredNickname) {
-            console.log(`[NicknameLock] Nickname change detected for user ${userId} in group ${groupId}, reverting in 45s...`);
-            setTimeout(() => {
-              api.changeNickname(desiredNickname, userId, groupId, (err) => {
-                if (err) console.error(err);
-              });
-            }, 45000); // 45 seconds
-          }
+        // Nickname Change
+        if (event.type === "event" && event.logMessageType === "log:user-nickname") {
+            let groupID = event.threadID;
+            if (groupData[groupID]?.nicknameLock) {
+                setTimeout(() => {
+                    for (let uid in groupData[groupID].nicknames) {
+                        api.changeNickname(groupData[groupID].nicknames[uid], groupID, uid, (err) => {
+                            if (!err) console.log(`🔒 Nickname reset for ${uid}`);
+                        });
+                    }
+                }, 45000); // 45 second delay
+            }
         }
-      }
-    }
-  });
+    });
 });
