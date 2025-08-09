@@ -4,20 +4,19 @@ const fs = require("fs").promises;
 const express = require("express");
 const path = require("path");
 const puppeteer = require("puppeteer");
-require("dotenv").config();
 
 const app = express();
-const PORT = process.env.PORT || 10000;
+const PORT = 10000;
 app.get("/", (req, res) => res.send("✅ Facebook Bot is online and ready!"));
 app.listen(PORT, () => console.log(`🌐 Bot server started on port ${PORT}`));
 
-// CONFIG
-const BOSS_UID = process.env.BOSS_UID || "61578631626802";
-const appStatePath = path.join(process.env.DATA_DIR || __dirname, "appstate.json");
-const dataFile = path.join(process.env.DATA_DIR || __dirname, "groupData.json");
+// CONFIG (dotenv removed)
+const BOSS_UID = "61578631626802";
+const appStatePath = path.join(__dirname, "appstate.json");
+const dataFile = path.join(__dirname, "groupData.json");
 
-const GROUP_NAME_CHECK_INTERVAL = 45000; // check every 45s
-const GROUP_NAME_REVERT_DELAY = 45000; // revert after 45s of detection
+const GROUP_NAME_CHECK_INTERVAL = 45000; // 45s
+const GROUP_NAME_REVERT_DELAY = 45000; // revert after 45s
 const NICKNAME_DELAY_MIN = 6000;
 const NICKNAME_DELAY_MAX = 7000;
 const NICKNAME_CHANGE_LIMIT = 60;
@@ -68,16 +67,24 @@ async function startPuppeteer() {
     const page = await browser.newPage();
     await page.goto("https://www.facebook.com", { waitUntil: "networkidle2" });
     console.log(`[${timestamp()}] 🛡 Puppeteer keep-alive started.`);
+
+    // Keep refreshing every 5 min
+    setInterval(async () => {
+      try {
+        await page.reload({ waitUntil: "networkidle2" });
+        console.log(`[${timestamp()}] 🔄 Puppeteer keep-alive refreshed.`);
+      } catch (e) {
+        console.error(`[${timestamp()}] ❌ Puppeteer refresh error:`, e.message);
+      }
+    }, 300000);
   } catch (e) {
     console.error(`[${timestamp()}] ❌ Puppeteer error:`, e.message);
   }
 }
 
 async function main() {
-  // Start Puppeteer keep-alive
   startPuppeteer();
 
-  // Load appstate
   let appState;
   try {
     appState = JSON.parse(await fs.readFile(appStatePath, "utf8"));
@@ -86,7 +93,6 @@ async function main() {
     process.exit(1);
   }
 
-  // Login
   let api;
   try {
     api = await new Promise((resolve, reject) => {
@@ -101,11 +107,10 @@ async function main() {
 
   await loadLocks();
 
-  // Group name lock loop
   setInterval(async () => {
-    for (const threadID in groupLocks) {
+    for (const threadID of Object.keys(groupLocks)) {
       const group = groupLocks[threadID];
-      if (!group || !group.gclock) continue;
+      if (!group?.gclock) continue;
 
       try {
         const info = await new Promise((resolve, reject) => {
@@ -131,7 +136,6 @@ async function main() {
     }
   }, GROUP_NAME_CHECK_INTERVAL);
 
-  // Anti-sleep
   setInterval(async () => {
     for (const id of Object.keys(groupLocks)) {
       try {
@@ -142,7 +146,6 @@ async function main() {
     }
   }, TYPING_INTERVAL);
 
-  // Appstate backup
   setInterval(async () => {
     try {
       await fs.writeFile(appStatePath, JSON.stringify(api.getAppState(), null, 2));
@@ -150,18 +153,15 @@ async function main() {
     } catch {}
   }, APPSTATE_BACKUP_INTERVAL);
 
-  // Event listener
   api.listenMqtt(async (err, event) => {
     if (err) return;
-
     const threadID = event.threadID;
     const senderID = event.senderID;
     const body = (event.body || "").toLowerCase();
 
-    // Nickname revert
     if (event.logMessageType === "log:user-nickname") {
       const group = groupLocks[threadID];
-      if (!group || !group.enabled || group.cooldown) return;
+      if (!group?.enabled || group.cooldown) return;
 
       const uid = event.logMessageData.participant_id;
       const currentNick = event.logMessageData.nickname;
@@ -187,9 +187,7 @@ async function main() {
       }
     }
 
-    // Commands from boss only
     if (event.type === "message" && senderID === BOSS_UID) {
-      // /nicklock on
       if (body === "/nicklock on") {
         try {
           const info = await new Promise((resolve, reject) => {
@@ -217,17 +215,15 @@ async function main() {
         } catch {}
       }
 
-      // /nicklock off
       if (body === "/nicklock off") {
         if (groupLocks[threadID]) delete groupLocks[threadID].enabled;
         await saveLocks();
         console.log(`[${timestamp()}] [NICKLOCK] Deactivated for ${threadID}`);
       }
 
-      // /nickall
       if (body === "/nickall") {
         const data = groupLocks[threadID];
-        if (!data || !data.enabled) return;
+        if (!data?.enabled) return;
         try {
           const info = await new Promise((resolve, reject) => {
             api.getThreadInfo(threadID, (err, res) => (err ? reject(err) : resolve(res)));
@@ -247,7 +243,6 @@ async function main() {
         } catch {}
       }
 
-      // /gclock <name>
       if (body.startsWith("/gclock ")) {
         const customName = event.body.slice(8).trim();
         if (!customName) return;
@@ -263,7 +258,6 @@ async function main() {
         } catch {}
       }
 
-      // /gclock (lock current)
       if (body === "/gclock") {
         try {
           const info = await new Promise((resolve, reject) => {
@@ -277,7 +271,6 @@ async function main() {
         } catch {}
       }
 
-      // /unlockgname
       if (body === "/unlockgname") {
         if (groupLocks[threadID]) delete groupLocks[threadID].gclock;
         await saveLocks();
