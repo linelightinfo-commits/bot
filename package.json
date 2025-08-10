@@ -1,17 +1,14 @@
 {
-  "name": "fb-group-lock-bot",
+  "name": "fb-bot",
   "version": "1.0.0",
-  "description": "Facebook Messenger Group Lock Bot",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "postinstall": "npx puppeteer@22.10.0 install chrome"
   },
   "dependencies": {
-    "dotenv": "^16.0.3",
-    "express": "^4.18.2",
-    "ws3-fca": "^1.0.0"
-  },
-  "engines": {
-    "node": ">=18"
+    "express": "^4.19.2",
+    "ws3-fca": "latest",
+    "puppeteer": "^22.10.0"
   }
 }
