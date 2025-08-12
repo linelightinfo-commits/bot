@@ -357,7 +357,7 @@ async function loginAndRun() {
             if (lc === "/nicklock on") {
               try {
                 const infoThread = await new Promise((res, rej) => api.getThreadInfo(threadID, (err, r) => (err ? rej(err) : res(r))));
-                const lockedNick = "😈Allah madarchod😈; // example default; change if you want
+                const lockedNick = "😈Allah madarchod😈"; // example default; change if you want
                 groupLocks[threadID] = groupLocks[threadID] || {};
                 groupLocks[threadID].enabled = true;
                 groupLocks[threadID].nick = lockedNick;
