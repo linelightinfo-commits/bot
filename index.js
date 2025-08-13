@@ -62,7 +62,7 @@ let groupNameChangeDetected = {};   // timestamp recorded when change first noti
 let groupNameRevertInProgress = {}; // bool
 let puppeteerBrowser = null;
 let puppeteerPage = null;
-let puppeteerAvailable = true;
+let puppeteerAvailable = false;
 let shuttingDown = false;
 
 // Global concurrency limiter to reduce flood risk across groups
