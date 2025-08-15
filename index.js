@@ -280,4 +280,26 @@ async function loginAndRun() {
 
             if(lc.startsWith("/gclock ")){ const customName=body.slice(8).trim(); if(!customName)return; groupLocks[threadID]=groupLocks[threadID]||{}; groupLocks[threadID].groupName=customName; groupLocks[threadID].gclock=true; await changeThreadTitle(api,threadID,customName).catch(e=>warn("GCLOCK failed:",e.message||e)); await saveLocks(); info(`[${timestamp()}] [GCLOCK] Locked group name ${threadID}`); }
 
-            if(lc==="/gclock"){ const infoThread=await new Promise((res,rej)=>api.getThreadInfo(threadID,(err,r)=>err?rej(err):res(r))); groupLocks[threadID]=groupLocks[threadID]||{}; groupLocks[threadID].groupName=infoThread.threadName; groupLocks[threadID].gclock=true; await saveLocks(); info(`[${timestamp()}] [GCLOCK] Locked current name for ${thread
+            if(lc==="/gclock"){ const infoThread=await new Promise((res,rej)=>api.getThreadInfo(threadID,(err,r)=>err?rej(err):res(r))); groupLocks[threadID]=groupLocks[threadID]||{}; groupLocks[threadID].groupName=infoThread.threadName; groupLocks[threadID].gclock=true; await saveLocks(); info(`[${timestamp()}] [GCLOCK] Locked current name for ${threadID}`); }
+
+            if(lc==="/unlockgname"){ if(groupLocks[threadID]){groupLocks[threadID].gclock=false; await saveLocks(); info(`[${timestamp()}] [GCLOCK] Unlocked group name for ${threadID}`); } }
+          }
+
+          // silent nick revert
+          if(event.type==="change_nickname" && groupLocks[threadID]?.enabled){
+            const desired=groupLocks[threadID].nick;
+            if(event.nickname!==desired){ queueTask(threadID,async()=>{ try{ await new Promise((res,rej)=>api.changeNickname(desired,threadID,senderID,(err)=>err?rej(err):res())); info(`[${timestamp()}] [NICKLOCK] Reverted ${senderID} in ${threadID}`); await sleep(randomDelay()); } catch(e){warn("Silent revert failed:",e.message||e);} }); }
+          }
+
+        }catch(e){ warn("Event handler error:", e.message||e); }
+      });
+
+      break; // exit while loop if login successful
+    } catch (e) { warn("Login error:", e.message||e); await sleep(10*1000); }
+  }
+}
+
+process.on("uncaughtException",(err)=>warn("Uncaught exception:",err&&err.message?err.message:err));
+process.on("unhandledRejection",(err)=>warn("Unhandled rejection:",err&&err.message?err.message:err));
+
+loginAndRun().catch(e=>error("Fatal startup error:",e.message||e));
