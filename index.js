@@ -21,17 +21,17 @@ const C = {
   red: "\x1b[31m",
   cyan: "\x1b[36m",
 };
-function log(...a) { console.log(C.cyan + "[BOT]" + C.reset, ...a); }
-function info(...a) { console.log(C.green + "[INFO]" + C.reset, ...a); }
-function warn(...a) { console.log(C.yellow + "[WARN]" + C.reset, ...a); }
-function error(...a) { console.log(C.red + "[ERR]" + C.reset, ...a); }
+function log(...a)   { console.log(C.cyan  + "[BOT]"  + C.reset, ...a); }
+function info(...a)  { console.log(C.green + "[INFO]" + C.reset, ...a); }
+function warn(...a)  { console.log(C.yellow+ "[WARN]" + C.reset, ...a); }
+function error(...a) { console.log(C.red   + "[ERR]"  + C.reset, ...a); }
 
 // Express for keepalive
 const express = require("express");
 const app = express();
 const PORT = process.env.PORT || 10000;
 app.get("/", (req, res) => res.send("✅ Facebook Bot is online and ready!"));
-app.listen(PORT, () => log(`Server started on port ${PORT}`));
+app.listen(PORT, () => log(`Server started on port ${PORT}`)); // ✅ fixed backticks
 
 // Config (overrides via .env)
 const BOSS_UID = process.env.BOSS_UID || "61578631626802";
@@ -87,7 +87,7 @@ function releaseGlobalSlot() {
 async function ensureDataFile() {
   try {
     await fsp.access(dataFile);
-  } catch (e) {
+  } catch {
     await fsp.writeFile(dataFile, JSON.stringify({}, null, 2));
   }
 }
@@ -152,12 +152,12 @@ async function startPuppeteerIfEnabled() {
   if (!ENABLE_PUPPETEER) { info("Puppeteer disabled."); return; }
   try {
     const puppeteer = require("puppeteer");
-    const launchOpts = { headless: true, args: ["--no-sandbox","--disable-setuid-sandbox"] };
+    const launchOpts = { headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox"] };
     if (CHROME_EXECUTABLE) launchOpts.executablePath = CHROME_EXECUTABLE;
     puppeteerBrowser = await puppeteer.launch(launchOpts);
     puppeteerPage = await puppeteerBrowser.newPage();
     await puppeteerPage.setUserAgent("Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X)");
-    await puppeteerPage.goto("https://www.facebook.com", { waitUntil: "networkidle2", timeout: 30000 }).catch(()=>{});
+    await puppeteerPage.goto("https://www.facebook.com", { waitUntil: "networkidle2", timeout: 30000 }).catch(() => {});
     puppeteerAvailable = true;
     info("Puppeteer ready.");
   } catch (e) {
@@ -178,7 +178,7 @@ async function changeThreadTitle(apiObj, threadID, title) {
   if (ENABLE_PUPPETEER && puppeteerAvailable) {
     try {
       const url = `https://www.facebook.com/messages/t/${threadID}`;
-      await puppeteerPage.goto(url, { waitUntil: "networkidle2", timeout: 30000 }).catch(()=>{});
+      await puppeteerPage.goto(url, { waitUntil: "networkidle2", timeout: 30000 }).catch(() => {});
       await puppeteerPage.waitForTimeout(1200);
       info(`[${timestamp()}] [PUPP] Puppeteer fallback attempted for title change (best-effort).`);
       return;
@@ -193,14 +193,20 @@ async function loadAppState() {
     try { return JSON.parse(process.env.APPSTATE); }
     catch (e) { warn("APPSTATE env invalid JSON:", e.message || e); }
   }
-  try { const txt = await fsp.readFile(appStatePath, "utf8"); return JSON.parse(txt); }
-  catch (e) { throw new Error("Cannot load appstate.json or APPSTATE env"); }
+  try {
+    const txt = await fsp.readFile(appStatePath, "utf8");
+    return JSON.parse(txt);
+  } catch {
+    throw new Error("Cannot load appstate.json or APPSTATE env");
+  }
 }
 
 // Safely get thread info (never throw, always return object)
 async function safeGetThreadInfo(apiObj, threadID) {
   try {
-    const info = await new Promise((res, rej) => apiObj.getThreadInfo(threadID, (err, r) => (err ? rej(err) : res(r))));
+    const info = await new Promise((res, rej) =>
+      apiObj.getThreadInfo(threadID, (err, r) => (err ? rej(err) : res(r)))
+    );
     if (!info || typeof info !== "object") return {};
     return info;
   } catch (e) {
@@ -230,7 +236,9 @@ async function initCheckLoop(apiObj) {
         if (!uid) continue;
         const desired = (group.original && group.original[uid]) || group.nick;
         if (!desired) continue;
-        const current = (info.nicknames && info.nicknames[uid]) || (Array.isArray(info.userInfo) && (info.userInfo.find(u => u.id === uid)?.nickname)) || null;
+        const current =
+          (info.nicknames && info.nicknames[uid]) ||
+          (Array.isArray(info.userInfo) && (info.userInfo.find(u => u.id === uid)?.nickname)) || null;
         if (current !== desired) {
           queueTask(t, async () => {
             try {
@@ -288,7 +296,7 @@ async function loginAndRun() {
             }
           };
         }
-      } catch (e) { /* ignore */ }
+      } catch { /* ignore */ }
 
       // load persisted locks
       await loadLocks();
@@ -311,7 +319,10 @@ async function loginAndRun() {
             if (currentName && currentName !== group.groupName) {
               if (!groupNameChangeDetected[threadID]) {
                 groupNameChangeDetected[threadID] = Date.now();
-                info(`[${timestamp()}] [GCLOCK] Detected change in ${threadID} -> "${currentName}". Will revert after ${GROUP_NAME_REVERT_DELAY/1000}s if still changed.`);
+                info(
+                  `[${timestamp()}] [GCLOCK] Detected change in ${threadID} -> "${currentName}". ` +
+                  `Will revert after ${GROUP_NAME_REVERT_DELAY/1000}s if still changed.`
+                );
               } else {
                 const elapsed = Date.now() - groupNameChangeDetected[threadID];
                 if (elapsed >= GROUP_NAME_REVERT_DELAY) {
@@ -349,7 +360,7 @@ async function loginAndRun() {
             const m = (e.message || "").toLowerCase();
             if (m.includes("client disconnecting") || m.includes("not logged in")) {
               warn("Detected client disconnect - attempting reconnect...");
-              try { api.removeAllListeners && api.removeAllListeners(); } catch(_){ }
+              try { api.removeAllListeners && api.removeAllListeners(); } catch(_) { }
               throw new Error("FORCE_RECONNECT");
             }
           }
@@ -451,7 +462,11 @@ async function loginAndRun() {
               groupLocks[threadID] = groupLocks[threadID] || {};
               groupLocks[threadID].groupName = customName;
               groupLocks[threadID].gclock = true;
-              try { await changeThreadTitle(api, threadID, customName); await saveLocks(); info(`[${timestamp()}] [GCLOCK] Locked group name for ${threadID}`); } catch (e) { warn("Could not set group name:", e.message || e); }
+              try {
+                await changeThreadTitle(api, threadID, customName);
+                await saveLocks();
+                info(`[${timestamp()}] [GCLOCK] Locked group name for ${threadID}`);
+              } catch (e) { warn("Could not set group name:", e.message || e); }
             }
 
             if (lc === "/gclock") {
@@ -564,9 +579,9 @@ process.on("unhandledRejection", (reason) => {
 async function gracefulExit() {
   shuttingDown = true;
   info("Graceful shutdown: saving state...");
-  try { if (api && api.getAppState) await fsp.writeFile(appStatePath, JSON.stringify(api.getAppState(), null, 2)); } catch (e) {}
-  try { await saveLocks(); } catch (e) {}
-  try { if (puppeteerBrowser) await puppeteerBrowser.close(); } catch (e) {}
+  try { if (api && api.getAppState) await fsp.writeFile(appStatePath, JSON.stringify(api.getAppState(), null, 2)); } catch {}
+  try { await saveLocks(); } catch {}
+  try { if (puppeteerBrowser) await puppeteerBrowser.close(); } catch {}
   process.exit(0);
 }
 process.on("SIGINT", gracefulExit);
