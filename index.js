@@ -1,12 +1,6 @@
 /**
- * Full Facebook Messenger Bot
- * - ws3-fca loginLib
- * - Boss UID commands
- * - Nickname lock (bot first, then participants)
- * - Group name lock (GCLOCK) auto-revert 47s
- * - Anti-sleep, Appstate backup
- * - Global concurrency limiter
- * - Render-ready
+ * Facebook Messenger Bot
+ * Fixed nickname & GCLOCK issues
  */
 
 const fs = require("fs");
@@ -16,251 +10,73 @@ const ws3 = require("ws3-fca");
 const loginLib = typeof ws3 === "function" ? ws3 : (ws3.default || ws3.login || ws3);
 require("dotenv").config();
 
-const C = {
-  reset: "\x1b[0m",
-  green: "\x1b[32m",
-  yellow: "\x1b[33m",
-  red: "\x1b[31m",
-  cyan: "\x1b[36m",
-};
+const C = { reset: "\x1b[0m", green: "\x1b[32m", yellow: "\x1b[33m", red: "\x1b[31m", cyan: "\x1b[36m" };
 function log(...a) { console.log(C.cyan + "[BOT]" + C.reset, ...a); }
 function info(...a) { console.log(C.green + "[INFO]" + C.reset, ...a); }
 function warn(...a) { console.log(C.yellow + "[WARN]" + C.reset, ...a); }
 function error(...a) { console.log(C.red + "[ERR]" + C.reset, ...a); }
 
-// Express for keepalive
 const express = require("express");
 const app = express();
 const PORT = process.env.PORT || 10000;
 app.get("/", (req, res) => res.send("✅ Facebook Bot is online and ready!"));
 app.listen(PORT, () => log(`Server started on port ${PORT}`));
 
-// Config
 const BOSS_UID = process.env.BOSS_UID || "61578631626802";
 const DATA_DIR = process.env.DATA_DIR || __dirname;
 const appStatePath = path.join(DATA_DIR, "appstate.json");
 const dataFile = path.join(DATA_DIR, "groupData.json");
 
-const GROUP_NAME_CHECK_INTERVAL = parseInt(process.env.GROUP_NAME_CHECK_INTERVAL) || 15000;
-const GROUP_NAME_REVERT_DELAY = parseInt(process.env.GROUP_NAME_REVERT_DELAY) || 47000;
-const NICKNAME_DELAY_MIN = parseInt(process.env.NICKNAME_DELAY_MIN) || 6000;
-const NICKNAME_DELAY_MAX = parseInt(process.env.NICKNAME_DELAY_MAX) || 7000;
-const NICKNAME_CHANGE_LIMIT = parseInt(process.env.NICKNAME_CHANGE_LIMIT) || 60;
-const NICKNAME_COOLDOWN = parseInt(process.env.NICKNAME_COOLDOWN) || 180000;
-const TYPING_INTERVAL = parseInt(process.env.TYPING_INTERVAL) || 300000;
-const APPSTATE_BACKUP_INTERVAL = parseInt(process.env.APPSTATE_BACKUP_INTERVAL) || 600000;
+const GROUP_NAME_CHECK_INTERVAL = 15000;
+const GROUP_NAME_REVERT_DELAY = 47000;
+const NICKNAME_DELAY_MIN = 6000;
+const NICKNAME_DELAY_MAX = 7000;
+const NICKNAME_CHANGE_LIMIT = 60;
+const NICKNAME_COOLDOWN = 3*60*1000;
+const TYPING_INTERVAL = 5*60*1000;
+const APPSTATE_BACKUP_INTERVAL = 10*60*1000;
 
-const ENABLE_PUPPETEER = (process.env.ENABLE_PUPPETEER || "false").toLowerCase() === "true";
-const CHROME_EXECUTABLE = process.env.CHROME_PATH || process.env.PUPPETEER_EXECUTABLE_PATH || null;
+let api=null, groupLocks={}, groupQueues={}, groupNameChangeDetected={}, groupNameRevertInProgress={}, shuttingDown=false;
+const GLOBAL_MAX_CONCURRENT = 3;
+let globalActiveCount=0, globalPending=[];
 
-// State
-let api = null;
-let groupLocks = {};
-let groupQueues = {};
-let groupNameChangeDetected = {};
-let groupNameRevertInProgress = {};
-let puppeteerBrowser = null;
-let puppeteerPage = null;
-let puppeteerAvailable = false;
-let shuttingDown = false;
+async function acquireGlobalSlot(){ if(globalActiveCount<GLOBAL_MAX_CONCURRENT){ globalActiveCount++; return; } await new Promise(r=>globalPending.push(r)); globalActiveCount++; }
+function releaseGlobalSlot(){ globalActiveCount=Math.max(0,globalActiveCount-1); if(globalPending.length){ const r=globalPending.shift(); r(); } }
 
-const GLOBAL_MAX_CONCURRENT = parseInt(process.env.GLOBAL_MAX_CONCURRENT) || 3;
-let globalActiveCount = 0;
-const globalPending = [];
-async function acquireGlobalSlot() {
-  if (globalActiveCount < GLOBAL_MAX_CONCURRENT) {
-    globalActiveCount++;
-    return;
-  }
-  await new Promise(res => globalPending.push(res));
-  globalActiveCount++;
-}
-function releaseGlobalSlot() {
-  globalActiveCount = Math.max(0, globalActiveCount - 1);
-  if (globalPending.length) globalPending.shift()();
-}
+const sleep = ms=>new Promise(res=>setTimeout(res,ms));
+function randomDelay(){ return Math.floor(Math.random()*(NICKNAME_DELAY_MAX-NICKNAME_DELAY_MIN+1))+NICKNAME_DELAY_MIN; }
+function timestamp(){ return new Date().toTimeString().split(" ")[0]; }
 
-// Helpers
-async function ensureDataFile() {
-  try { await fsp.access(dataFile); } catch(e){ await fsp.writeFile(dataFile, "{}"); }
-}
-async function loadLocks() {
-  await ensureDataFile();
-  try { groupLocks = JSON.parse(await fsp.readFile(dataFile, "utf8") || "{}"); info("Loaded group locks."); } 
-  catch(e){ warn("Failed to load locks:", e.message||e); groupLocks={}; }
-}
-async function saveLocks() {
-  try { await fsp.writeFile(dataFile, JSON.stringify(groupLocks,null,2)); info("Saved group locks."); } 
-  catch(e){ warn("Failed to save locks:", e.message||e); }
-}
-const sleep = ms => new Promise(res=>setTimeout(res, ms));
-const randomDelay = () => Math.floor(Math.random()*(NICKNAME_DELAY_MAX-NICKNAME_DELAY_MIN+1))+NICKNAME_DELAY_MIN;
-const timestamp = () => new Date().toTimeString().split(" ")[0];
+function ensureQueue(threadID){ if(!groupQueues[threadID]) groupQueues[threadID]={running:false,tasks:[]}; return groupQueues[threadID]; }
+function queueTask(threadID,fn){ const q=ensureQueue(threadID); q.tasks.push(fn); if(!q.running) runQueue(threadID); }
+async function runQueue(threadID){ const q=ensureQueue(threadID); if(q.running) return; q.running=true; while(q.tasks.length){ const fn=q.tasks.shift(); try{ await acquireGlobalSlot(); try{ await fn(); } finally{ releaseGlobalSlot(); } }catch(e){ warn(`[${timestamp()}] Queue error ${threadID}:`,e.message||e); } await sleep(250); } q.running=false; }
 
-function ensureQueue(threadID) { if(!groupQueues[threadID]) groupQueues[threadID]={running:false,tasks:[]}; return groupQueues[threadID]; }
-function queueTask(threadID, fn) { const q=ensureQueue(threadID); q.tasks.push(fn); if(!q.running) runQueue(threadID);}
-async function runQueue(threadID){
-  const q=ensureQueue(threadID); if(q.running) return; q.running=true;
-  while(q.tasks.length){
-    const fn=q.tasks.shift();
-    try{ await acquireGlobalSlot(); try{ await fn(); }finally{ releaseGlobalSlot(); } } 
-    catch(e){ warn(`[${timestamp()}] Queue error for ${threadID}:`,e.message||e); }
-    await sleep(250);
-  }
-  q.running=false;
-}
+async function ensureDataFile(){ try{ await fsp.access(dataFile); }catch(e){ await fsp.writeFile(dataFile,JSON.stringify({},null,2)); } }
+async function loadLocks(){ await ensureDataFile(); try{ const txt=await fsp.readFile(dataFile,"utf8"); groupLocks=JSON.parse(txt||"{}"); info("Loaded group locks."); }catch(e){ warn("Failed to load group locks:",e.message||e); groupLocks={}; } }
+async function saveLocks(){ try{ const tmp=`${dataFile}.tmp`; await fsp.writeFile(tmp,JSON.stringify(groupLocks,null,2)); await fsp.rename(tmp,dataFile); info("Group locks saved."); }catch(e){ warn("Failed to save locks:",e.message||e); } }
 
-// Puppeteer fallback
-async function startPuppeteerIfEnabled() {
-  if(!ENABLE_PUPPETEER){ info("Puppeteer disabled."); return; }
-  try {
-    const puppeteer=require("puppeteer");
-    puppeteerBrowser=await puppeteer.launch({headless:true,args:["--no-sandbox","--disable-setuid-sandbox"], executablePath:CHROME_EXECUTABLE||undefined});
-    puppeteerPage=await puppeteerBrowser.newPage();
-    await puppeteerPage.setUserAgent("Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X)");
-    await puppeteerPage.goto("https://www.facebook.com",{waitUntil:"networkidle2",timeout:30000}).catch(()=>{});
-    puppeteerAvailable=true; info("Puppeteer ready.");
-  }catch(e){ puppeteerAvailable=false; warn("Puppeteer init failed:",e.message||e);}
-}
+async function getThreadInfoRetry(threadID,retries=3){ for(let i=0;i<retries;i++){ try{ const info=await new Promise((res,rej)=>api.getThreadInfo(threadID,(err,r)=>err?rej(err):res(r))); if(info) return info; }catch(e){ await sleep(1000); } } throw new Error(`Cannot fetch thread info for ${threadID}`); }
 
-async function changeThreadTitle(apiObj,threadID,title){
-  if(!apiObj) throw new Error("No api");
-  if(typeof apiObj.setTitle==="function") return new Promise((r,rej)=>apiObj.setTitle(title,threadID,err=>err?rej(err):r()));
-  if(typeof apiObj.changeThreadTitle==="function") return new Promise((r,rej)=>apiObj.changeThreadTitle(title,threadID,err=>err?rej(err):r()));
-  if(ENABLE_PUPPETEER && puppeteerAvailable){
-    try{ const url=`https://www.facebook.com/messages/t/${threadID}`; await puppeteerPage.goto(url,{waitUntil:"networkidle2",timeout:30000}); await puppeteerPage.waitForTimeout(1200); info(`[${timestamp()}] [PUPP] Puppeteer fallback attempted`); return; }catch(e){ throw e; }
-  }
-  throw new Error("No method to change thread title");
-}
+async function initCheckLoop(apiObj){ try{ const threads=Object.keys(groupLocks); for(const t of threads){ const group=groupLocks[t]; if(!group||!group.enabled) continue; let infoThread; try{ infoThread=await getThreadInfoRetry(t); }catch(e){ warn("Init check failed for",t); continue; } const participants=infoThread.participantIDs||infoThread.userInfo?.map(u=>u.id)||[]; for(const uid of participants){ const desired=group.original?.[uid]||group.nick; if(!desired) continue; const current=(infoThread.nicknames?.[uid])||(infoThread.userInfo?.find(u=>u.id===uid)?.nickname)||null; if(current!==desired){ queueTask(t,async()=>{ try{ await new Promise((res,rej)=>apiObj.changeNickname(desired,t,uid,(err)=>err?rej(err):res())); info(`🎭 [${timestamp()}] [INIT] Nick applied ${uid} in ${t}`); await sleep(randomDelay()); }catch(e){ warn(`[${timestamp()}] INIT failed ${uid} in ${t}:`,e.message||e); } }); } } } }catch(e){ warn("initCheckLoop error:",e.message||e); } }
 
-async function loadAppState(){
-  if(process.env.APPSTATE) try{ return JSON.parse(process.env.APPSTATE); } catch(e){ warn("APPSTATE env invalid JSON:",e.message||e);}
-  try{ return JSON.parse(await fsp.readFile(appStatePath,"utf8")); } catch(e){ throw new Error("Cannot load appstate"); }
-}
+async function changeThreadTitle(apiObj,threadID,title){ if(!apiObj) throw new Error("No api"); if(typeof apiObj.setTitle==="function") return new Promise((r,rej)=>apiObj.setTitle(title,threadID,(err)=>err?rej(err):r())); if(typeof apiObj.changeThreadTitle==="function") return new Promise((r,rej)=>apiObj.changeThreadTitle(title,threadID,(err)=>err?rej(err):r())); throw new Error("No method to change title"); }
 
-// initCheckLoop: apply nicknames for all participants
-async function initCheckLoop(apiObj){
-  try{
-    const threadIDs=Object.keys(groupLocks);
-    for(let t of threadIDs){
-      const group=groupLocks[t];
-      if(!group||!group.enabled) continue;
-      try{
-        const info=await new Promise((res,rej)=>apiObj.getThreadInfo(t,(err,r)=>err?rej(err):res(r)));
-        const participants=info?.participantIDs||(info?.userInfo?.map(u=>u.id))||[];
-        for(const uid of participants){
-          const desired=group.original?.[uid]||group.nick;
-          if(!desired) continue;
-          const current=(info.nicknames?.[uid])||(info.userInfo?.find(u=>u.id===uid)?.nickname)||null;
-          if(current!==desired){
-            queueTask(t,async()=>{
-              try{ await new Promise((res,rej)=>apiObj.changeNickname(desired,t,uid,err=>err?rej(err):res())); info(`🎭 [${timestamp()}] [INIT] Nick applied for ${uid}`); await sleep(randomDelay()); } 
-              catch(e){ warn(`[${timestamp()}] INIT revert failed ${uid}:`,e.message||e); }
-            });
-          }
-        }
-      }catch(e){}
-    }
-  }catch(e){ warn("initCheckLoop err:",e.message||e);}
-}
+async function loadAppState(){ if(process.env.APPSTATE){ try{return JSON.parse(process.env.APPSTATE);}catch(e){warn("APPSTATE env invalid JSON");} } try{ const txt=await fsp.readFile(appStatePath,"utf8"); return JSON.parse(txt); }catch(e){ throw new Error("Cannot load appstate"); } }
 
-// main login
-let loginAttempts=0;
-async function loginAndRun(){
-  while(!shuttingDown){
-    try{
-      const appState=await loadAppState();
-      info(`[${timestamp()}] Attempt login (attempt ${++loginAttempts})`);
-      api=await new Promise((res,rej)=>{ loginLib({appState},(err,a)=>err?rej(err):res(a)); });
-      api.setOptions({listenEvents:true,selfListen:true,updatePresence:true});
-      info(`[${timestamp()}] Logged in as: ${api.getCurrentUserID?api.getCurrentUserID():"unknown"}`);
-      await loadLocks();
-      startPuppeteerIfEnabled().catch(e=>warn("Puppeteer init err:",e.message||e));
+async function loginAndRun(){ while(!shuttingDown){ try{ const appState=await loadAppState(); api=await new Promise((res,rej)=>{ try{ loginLib({appState},(err,a)=>err?rej(err):res(a)); }catch(e){rej(e);} }); api.setOptions({listenEvents:true,selfListen:true,updatePresence:true}); info(`[${timestamp()}] Logged in as: ${api.getCurrentUserID?api.getCurrentUserID():"?"}`); await loadLocks(); await initCheckLoop(api);  
 
-      // Group name watcher
-      setInterval(async()=>{
-        const threadIDs=Object.keys(groupLocks);
-        for(const threadID of threadIDs){
-          const group=groupLocks[threadID];
-          if(!group||!group.gclock) continue;
-          if(groupNameRevertInProgress[threadID]) continue;
-          try{
-            const infoObj=await new Promise((res,rej)=>api.getThreadInfo(threadID,(err,r)=>err?rej(err):res(r)));
-            if(infoObj?.threadName!==group.groupName){
-              if(!groupNameChangeDetected[threadID]) groupNameChangeDetected[threadID]=Date.now();
-              else if(Date.now()-groupNameChangeDetected[threadID]>=GROUP_NAME_REVERT_DELAY){
-                groupNameRevertInProgress[threadID]=true;
-                try{ await changeThreadTitle(api,threadID,group.groupName); info(`[${timestamp()}] [GCLOCK] Reverted ${threadID}`); } 
-                catch(e){ warn(`[${timestamp()}] [GCLOCK] Revert failed ${threadID}:`,e.message||e); } 
-                finally{ groupNameChangeDetected[threadID]=null; groupNameRevertInProgress[threadID]=false; }
-              }
-            }else groupNameChangeDetected[threadID]=null;
-          }catch(e){ warn(`[${timestamp()}] GCLOCK error ${threadID}:`,e.message||e);}
-        }
-      },GROUP_NAME_CHECK_INTERVAL);
+// GCLOCK watcher
+setInterval(async()=>{ for(const t of Object.keys(groupLocks)){ const g=groupLocks[t]; if(!g?.gclock) continue; if(groupNameRevertInProgress[t]) continue; try{ const infoThread=await getThreadInfoRetry(t); if(infoThread.threadName!==g.groupName){ if(!groupNameChangeDetected[t]){ groupNameChangeDetected[t]=Date.now(); info(`[${timestamp()}] [GCLOCK] Detected change ${t} -> will revert in 47s`); } else if(Date.now()-groupNameChangeDetected[t]>=GROUP_NAME_REVERT_DELAY){ groupNameRevertInProgress[t]=true; try{ await changeThreadTitle(api,t,g.groupName); info(`[${timestamp()}] [GCLOCK] Reverted ${t} -> ${g.groupName}`); }catch(e){ warn(`[${timestamp()}] GCLOCK revert failed ${t}:`,e.message||e); } finally{ groupNameChangeDetected[t]=null; groupNameRevertInProgress[t]=false; } } }else groupNameChangeDetected[t]=null; }catch(e){ warn(`[${timestamp()}] GCLOCK check failed ${t}:`,e.message||e); } } },GROUP_NAME_CHECK_INTERVAL);
 
-      // Anti-sleep typing
-      setInterval(async()=>{
-        for(const id of Object.keys(groupLocks)){
-          try{
-            const g=groupLocks[id];
-            if(!g||(!g.gclock&&!g.enabled)) continue;
-            await new Promise((res,rej)=>api.sendTypingIndicator(id,err=>err?rej(err):res()));
-            await sleep(1200);
-          }catch(e){ warn(`[${timestamp()}] Typing failed ${id}:`,e.message||e);}
-        }
-      },TYPING_INTERVAL);
+// Anti-sleep
+setInterval(async()=>{ for(const id of Object.keys(groupLocks)){ const g=groupLocks[id]; if(!g||(!g.gclock&&!g.enabled)) continue; try{ await new Promise((res,rej)=>api.sendTypingIndicator(id,(err)=>err?rej(err):res())); await sleep(1200); }catch(e){ warn(`[${timestamp()}] Typing failed for ${id}:`,e.message||e); } } },TYPING_INTERVAL);
 
-      // Appstate backup
-      setInterval(async()=>{
-        try{ const s=api.getAppState?api.getAppState():null; if(s) await fsp.writeFile(appStatePath,JSON.stringify(s,null,2)); info(`[${timestamp()}] Appstate backed up.`); }
-        catch(e){ warn("Appstate backup failed:",e.message||e);}
-      },APPSTATE_BACKUP_INTERVAL);
+// Appstate backup
+setInterval(async()=>{ try{ const s=api.getAppState?api.getAppState():null; if(s) await fsp.writeFile(appStatePath,JSON.stringify(s,null,2)); info(`[${timestamp()}] Appstate backed up.`); }catch(e){ warn("Appstate backup failed:",e.message||e); } },APPSTATE_BACKUP_INTERVAL);
 
-      // Initial nick apply
-      await initCheckLoop(api);
-      setInterval(()=>initCheckLoop(api).catch(e=>warn("initCheck err:",e.message||e)),300000);
+// Event listener
+api.listenMqtt(async(err,event)=>{ if(err){ warn("listenMqtt error:",err.message||err); return; } try{ const threadID=event.threadID,senderID=event.senderID,body=(event.body||"").toString().trim(); if(event.type==="message" && senderID===BOSS_UID){ const lc=body.toLowerCase(); if(lc==="/nicklock on"){ const infoThread=await getThreadInfoRetry(threadID); groupLocks[threadID]=groupLocks[threadID]||{enabled:true,nick:"😈Allah😈",original:{},count:0,cooldown:false}; groupLocks[threadID].enabled=true; groupLocks[threadID].nick="😈Allah😈"; groupLocks[threadID].original=groupLocks[threadID].original||{}; groupLocks[threadID].count=0; groupLocks[threadID].cooldown=false; // first apply bot nick queueTask(threadID,async()=>{ try{ await new Promise((res,rej)=>api.changeNickname(groupLocks[threadID].nick,threadID,api.getCurrentUserID(),(err)=>err?rej(err):res())); info(`[${timestamp()}] Bot nick changed first`); await sleep(randomDelay()); }catch(e){ warn("Bot nick apply failed:",e.message||e); } }); // then apply all participants for(const u of infoThread.participantIDs){ groupLocks[threadID].original[u]=groupLocks[threadID].nick; queueTask(threadID,async()=>{ try{ await new Promise((res,rej)=>api.changeNickname(groupLocks[threadID].nick,threadID,u,(err)=>err?rej(err):res())); info(`🎭 [${timestamp()}] [NICKLOCK] Nick applied ${u}`); await sleep(randomDelay()); }catch(e){ warn(`Nick apply failed ${u}:`,e.message||e); } }); } await saveLocks(); info(`[${timestamp()}] [NICKLOCK] Activated for ${threadID}`); }else if(lc==="/nicklock off"){ if(groupLocks[threadID]){ groupLocks[threadID].enabled=false; await saveLocks(); info(`[${timestamp()}] [NICKLOCK] Deactivated for ${threadID}`); } } else if(lc.startsWith("/gclock ")){ const title=body.substring(8).trim(); groupLocks[threadID]=groupLocks[threadID]||{}; groupLocks[threadID].gclock=true; groupLocks[threadID].groupName=title; info(`[${timestamp()}] [GCLOCK] Set ${threadID} -> ${title}`); await saveLocks(); } else if(lc==="/unlockgname"){ if(groupLocks[threadID]){ groupLocks[threadID].gclock=false; await saveLocks(); info(`[${timestamp()}] [GCLOCK] Unlocked ${threadID}`); } } } }catch(e){ warn("Event listener main error:",e.message||e); } });
 
-      // Event listener
-      api.listenMqtt(async(err,event)=>{
-        if(err){ warn("listenMqtt error:",err.message||err); return; }
-        try{
-          const threadID=event.threadID;
-          const senderID=event.senderID;
-          const body=(event.body||"").trim();
+break; }catch(e){ warn("Login error:",e.message||e); await sleep(5000); } } }
 
-          // Boss commands
-          if(event.type==="message"&&senderID===BOSS_UID){
-            const lc=body.toLowerCase();
-            if(lc==="/nicklock on"){
-              const infoThread=await new Promise((res,rej)=>api.getThreadInfo(threadID,(err,r)=>err?rej(err):res(r)));
-              if(!groupLocks[threadID]) groupLocks[threadID]={enabled:true,nick:null,original:{}};
-              groupLocks[threadID].enabled=true;
-              if(!groupLocks[threadID].original) groupLocks[threadID].original={};
-              for(const u of infoThread.participantIDs) groupLocks[threadID].original[u]=infoThread.nicknames?.[u]||null;
-              info(`[${timestamp()}] [NICKLOCK] Activated for ${threadID}`);
-              saveLocks();
-              await initCheckLoop(api);
-            }else if(lc==="/nicklock off"){ if(groupLocks[threadID]){ groupLocks[threadID].enabled=false; saveLocks(); info(`[${timestamp()}] [NICKLOCK] Deactivated for ${threadID}`); } }
-            else if(lc.startsWith("/gclock ")){ const title=body.substring(8).trim(); if(!groupLocks[threadID]) groupLocks[threadID]={}; groupLocks[threadID].gclock=true; groupLocks[threadID].groupName=title; info(`[${timestamp()}] [GCLOCK] Set for ${threadID} -> ${title}`); saveLocks(); }
-            else if(lc==="/unlockgname"){ if(groupLocks[threadID]){ groupLocks[threadID].gclock=false; info(`[${timestamp()}] [GCLOCK] Disabled for ${threadID}`); saveLocks(); } }
-          }
-
-        }catch(e){ warn("Event listener failed:",e.message||e);}
-      });
-
-      break; // success login exit while
-
-    }catch(e){
-      warn(`[${timestamp()}] Login failed:`, e.message||e);
-      await sleep(5000);
-    }
-  }
-}
-
-// Graceful shutdown
-process.on("SIGINT", async()=>{ info("SIGINT received."); shuttingDown=true; await saveLocks(); process.exit(0); });
-process.on("SIGTERM", async()=>{ info("SIGTERM received."); shuttingDown=true; await saveLocks(); process.exit(0); });
-
-// Start
-loginAndRun().catch(e=>error("Fatal error:",e.message||e));
+loginAndRun();
