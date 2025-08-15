@@ -1,13 +1,9 @@
-
-
-
 /**
- * Combined final index.js
- * - Uses ws3-fca (loginLib) + optional Puppeteer fallback
- * - Supports boss commands and auto-lock from groupData.json
- * - Nickname delay: 6000-7000 ms
- * - Group-name revert: wait 47s after change detected
- * - Global concurrency limiter to reduce flood risk
+ * Final improved index.js
+ * - Stabilized error handling, recovery and health checks
+ * - Keeps all features from your original script (nicklock, gclock, /nickall, etc.)
+ * - Safe load/save for groupData.json (backs up corrupt JSON)
+ * - Optional Puppeteer fallback (ENABLE_PUPPETEER=true)
  */
 
 const fs = require("fs");
@@ -42,51 +38,46 @@ const DATA_DIR = process.env.DATA_DIR || __dirname;
 const appStatePath = path.join(DATA_DIR, "appstate.json");
 const dataFile = path.join(DATA_DIR, "groupData.json");
 
-// timing rules you asked for
-const GROUP_NAME_CHECK_INTERVAL = parseInt(process.env.GROUP_NAME_CHECK_INTERVAL) || 15 * 1000; // how often to poll (ms)
-const GROUP_NAME_REVERT_DELAY = parseInt(process.env.GROUP_NAME_REVERT_DELAY) || 47 * 1000; // WAIT 47s before revert
-const NICKNAME_DELAY_MIN = parseInt(process.env.NICKNAME_DELAY_MIN) || 6000; // 6s
-const NICKNAME_DELAY_MAX = parseInt(process.env.NICKNAME_DELAY_MAX) || 7000; // 7s
+// timing rules
+const GROUP_NAME_CHECK_INTERVAL = parseInt(process.env.GROUP_NAME_CHECK_INTERVAL) || 15 * 1000;
+const GROUP_NAME_REVERT_DELAY = parseInt(process.env.GROUP_NAME_REVERT_DELAY) || 47 * 1000;
+const NICKNAME_DELAY_MIN = parseInt(process.env.NICKNAME_DELAY_MIN) || 6000;
+const NICKNAME_DELAY_MAX = parseInt(process.env.NICKNAME_DELAY_MAX) || 7000;
 const NICKNAME_CHANGE_LIMIT = parseInt(process.env.NICKNAME_CHANGE_LIMIT) || 60;
-const NICKNAME_COOLDOWN = parseInt(process.env.NICKNAME_COOLDOWN) || 3 * 60 * 1000; // 3min
+const NICKNAME_COOLDOWN = parseInt(process.env.NICKNAME_COOLDOWN) || 3 * 60 * 1000;
 const TYPING_INTERVAL = parseInt(process.env.TYPING_INTERVAL) || 5 * 60 * 1000;
 const APPSTATE_BACKUP_INTERVAL = parseInt(process.env.APPSTATE_BACKUP_INTERVAL) || 10 * 60 * 1000;
+const HEALTH_CHECK_INTERVAL = parseInt(process.env.HEALTH_CHECK_INTERVAL) || 10 * 60 * 1000;
 
 const ENABLE_PUPPETEER = (process.env.ENABLE_PUPPETEER || "false").toLowerCase() === "true";
 const CHROME_EXECUTABLE = process.env.CHROME_PATH || process.env.PUPPETEER_EXECUTABLE_PATH || null;
 
 // State
 let api = null;
-let groupLocks = {};                // persisted config loaded from groupData.json
-let groupQueues = {};               // per-thread queues (in-memory)
-let groupNameChangeDetected = {};   // timestamp recorded when change first noticed
-let groupNameRevertInProgress = {}; // bool
+let groupLocks = {};
+let groupQueues = {};
+let groupNameChangeDetected = {};
+let groupNameRevertInProgress = {};
 let puppeteerBrowser = null;
 let puppeteerPage = null;
 let puppeteerAvailable = false;
 let shuttingDown = false;
 
-// Global concurrency limiter to reduce flood risk across groups
+// Global concurrency limiter
 const GLOBAL_MAX_CONCURRENT = parseInt(process.env.GLOBAL_MAX_CONCURRENT) || 3;
 let globalActiveCount = 0;
 const globalPending = [];
 async function acquireGlobalSlot() {
-  if (globalActiveCount < GLOBAL_MAX_CONCURRENT) {
-    globalActiveCount++;
-    return;
-  }
+  if (globalActiveCount < GLOBAL_MAX_CONCURRENT) { globalActiveCount++; return; }
   await new Promise((res) => globalPending.push(res));
   globalActiveCount++;
 }
 function releaseGlobalSlot() {
   globalActiveCount = Math.max(0, globalActiveCount - 1);
-  if (globalPending.length) {
-    const r = globalPending.shift();
-    r();
-  }
+  if (globalPending.length) { const r = globalPending.shift(); r(); }
 }
 
-// Helpers: file ops
+// Helpers: file ops (safe)
 async function ensureDataFile() {
   try {
     await fsp.access(dataFile);
@@ -98,8 +89,18 @@ async function loadLocks() {
   try {
     await ensureDataFile();
     const txt = await fsp.readFile(dataFile, "utf8");
-    groupLocks = JSON.parse(txt || "{}");
-    info("Loaded saved group locks.");
+    try {
+      groupLocks = JSON.parse(txt || "{}");
+      info("Loaded saved group locks.");
+    } catch (parseErr) {
+      // Backup corrupt file and create a new empty file to avoid crash
+      const ts = new Date().toISOString().replace(/[:.]/g, "-");
+      const backup = `${dataFile}.broken.${ts}`;
+      await fsp.copyFile(dataFile, backup).catch(()=>{});
+      warn(`groupData.json is corrupted. Backed up to ${path.basename(backup)}. Creating fresh groupData.json.`);
+      groupLocks = {};
+      await fsp.writeFile(dataFile, JSON.stringify({}, null, 2));
+    }
   } catch (e) {
     warn("Failed to load groupData.json:", e.message || e);
     groupLocks = {};
@@ -123,7 +124,7 @@ function randomDelay() {
 }
 function timestamp() { return new Date().toTimeString().split(" ")[0]; }
 
-// per-thread queue helpers (but each task will acquire global slot before running)
+// per-thread queue helpers
 function ensureQueue(threadID) {
   if (!groupQueues[threadID]) groupQueues[threadID] = { running: false, tasks: [] };
   return groupQueues[threadID];
@@ -140,28 +141,19 @@ async function runQueue(threadID) {
   while (q.tasks.length) {
     const fn = q.tasks.shift();
     try {
-      // acquire global concurrency slot
       await acquireGlobalSlot();
-      try {
-        await fn();
-      } finally {
-        releaseGlobalSlot();
-      }
+      try { await fn(); } finally { releaseGlobalSlot(); }
     } catch (e) {
-      warn(`[${timestamp()}] Queue task error for ${threadID}:`, e.message || e);
+      warn(`[${timestamp()}] Queue task error for ${threadID}:`, e && e.message ? e.message : e);
     }
-    // tiny gap to avoid immediate bursts
     await sleep(250);
   }
   q.running = false;
 }
 
-// Puppeteer fallback (optional)
+// Puppeteer fallback
 async function startPuppeteerIfEnabled() {
-  if (!ENABLE_PUPPETEER) {
-    info("Puppeteer disabled.");
-    return;
-  }
+  if (!ENABLE_PUPPETEER) { info("Puppeteer disabled."); return; }
   try {
     const puppeteer = require("puppeteer");
     const launchOpts = { headless: true, args: ["--no-sandbox","--disable-setuid-sandbox"] };
@@ -188,7 +180,6 @@ async function changeThreadTitle(apiObj, threadID, title) {
     return new Promise((r, rej) => apiObj.changeThreadTitle(title, threadID, (err) => (err ? rej(err) : r())));
   }
   if (ENABLE_PUPPETEER && puppeteerAvailable) {
-    // best-effort fallback: navigate to thread and try to use UI
     try {
       const url = `https://www.facebook.com/messages/t/${threadID}`;
       await puppeteerPage.goto(url, { waitUntil: "networkidle2", timeout: 30000 }).catch(()=>{});
@@ -202,14 +193,10 @@ async function changeThreadTitle(apiObj, threadID, title) {
   throw new Error("No method to change thread title");
 }
 
-// appState loader: accept ENV or file
+// appState loader
 async function loadAppState() {
   if (process.env.APPSTATE) {
-    try {
-      return JSON.parse(process.env.APPSTATE);
-    } catch (e) {
-      warn("APPSTATE env invalid JSON:", e.message || e);
-    }
+    try { return JSON.parse(process.env.APPSTATE); } catch (e) { warn("APPSTATE env invalid JSON:", e.message || e); }
   }
   try {
     const txt = await fsp.readFile(appStatePath, "utf8");
@@ -219,7 +206,7 @@ async function loadAppState() {
   }
 }
 
-// init check: reapply nicknames according to groupLocks (run on start + periodically)
+// initCheck: reapply nicknames on start/interval
 async function initCheckLoop(apiObj) {
   try {
     const threadIDs = Object.keys(groupLocks);
@@ -250,6 +237,36 @@ async function initCheckLoop(apiObj) {
   } catch (e) { warn("initCheckLoop error:", e.message || e); }
 }
 
+// Health check / connection watcher
+async function startHealthWatcher() {
+  setInterval(async () => {
+    try {
+      if (!api) throw new Error("no_api");
+      // try a small call to confirm connection (getCurrentUserID or a non-invasive call)
+      if (typeof api.getCurrentUserID === "function") {
+        const id = api.getCurrentUserID();
+        if (!id) throw new Error("no_userid");
+      } else if (!api.getCurrentUserID) {
+        // older clients may expose current user id differently; skip strict check
+      }
+      // also try sendTypingIndicator to a saved thread (if any)
+      const anyThread = Object.keys(groupLocks)[0];
+      if (anyThread) {
+        try {
+          await new Promise((res, rej) => api.sendTypingIndicator(anyThread, (err) => (err ? rej(err) : res())));
+        } catch (e) {
+          warn("Health check typing indicator failed:", e.message || e);
+          throw new Error("health_typing_failed");
+        }
+      }
+    } catch (e) {
+      warn("Health check detected issue:", e.message || e);
+      try { api.removeAllListeners && api.removeAllListeners(); } catch(_) {}
+      throw new Error("FORCE_RECONNECT");
+    }
+  }, HEALTH_CHECK_INTERVAL);
+}
+
 // Main login + run with reconnect logic
 let loginAttempts = 0;
 async function loginAndRun() {
@@ -262,14 +279,20 @@ async function loginAndRun() {
           loginLib({ appState }, (err, a) => (err ? rej(err) : res(a)));
         } catch (e) { rej(e); }
       });
-      api.setOptions({ listenEvents: true, selfListen: true, updatePresence: true });
+
+      // set options
+      try { api.setOptions({ listenEvents: true, selfListen: true, updatePresence: true }); } catch (_) {}
+
       info(`[${timestamp()}] Logged in as: ${api.getCurrentUserID ? api.getCurrentUserID() : "(unknown)"} `);
 
       // load persisted locks
       await loadLocks();
 
-      // start puppeteer optionally
+      // start puppeteer optionally (non-blocking)
       startPuppeteerIfEnabled().catch(e => warn("Puppeteer init err:", e.message || e));
+
+      // start health watcher
+      startHealthWatcher().catch(e => warn("healthwatch err:", e.message || e));
 
       // group-name watcher: detects name change and reverts after GROUP_NAME_REVERT_DELAY (47s)
       setInterval(async () => {
@@ -320,7 +343,7 @@ async function loginAndRun() {
             await sleep(1200);
           } catch (e) {
             warn(`[${timestamp()}] Typing indicator failed for ${id}:`, e.message || e);
-            if ((e.message || "").toLowerCase().includes("client disconnecting") || (e.message || "").toLowerCase().includes("not logged in")) {
+            if ((e.message || "").toLowerCase().includes("client disconnecting") || (e.message || "").toLowerCase().includes("not logged in") || (e.message || "").toLowerCase().includes("failed to send")) {
               warn("Detected client disconnect - attempting reconnect...");
               try { api.removeAllListeners && api.removeAllListeners(); } catch(_){}
               throw new Error("FORCE_RECONNECT");
@@ -345,7 +368,7 @@ async function loginAndRun() {
       // Event listener
       api.listenMqtt(async (err, event) => {
         if (err) {
-          warn("listenMqtt error:", err.message || err);
+          warn("listenMqtt error:", err && err.message ? err.message : err);
           return;
         }
         try {
@@ -359,14 +382,13 @@ async function loginAndRun() {
             if (lc === "/nicklock on") {
               try {
                 const infoThread = await new Promise((res, rej) => api.getThreadInfo(threadID, (err, r) => (err ? rej(err) : res(r))));
-                const lockedNick = "😈Allah madarchod😈"; // example default; change if you want
+                const lockedNick = process.env.DEFAULT_LOCKED_NICK || "LockedName";
                 groupLocks[threadID] = groupLocks[threadID] || {};
                 groupLocks[threadID].enabled = true;
                 groupLocks[threadID].nick = lockedNick;
                 groupLocks[threadID].original = groupLocks[threadID].original || {};
                 groupLocks[threadID].count = 0;
                 groupLocks[threadID].cooldown = false;
-                // Queue mass changes (each task will respect global concurrency + 6-7s delay)
                 for (const user of (infoThread.userInfo || [])) {
                   groupLocks[threadID].original[user.id] = lockedNick;
                   queueTask(threadID, async () => {
@@ -437,12 +459,10 @@ async function loginAndRun() {
           if (event.type === "event" && event.logMessageType === "log:thread-name") {
             const lockedName = groupLocks[event.threadID]?.groupName;
             if (lockedName && event.logMessageData?.name !== lockedName) {
-              // queue revert but respect the 47s rule: set detection timestamp if not set
               if (!groupNameChangeDetected[event.threadID]) {
                 groupNameChangeDetected[event.threadID] = Date.now();
                 info(`[${timestamp()}] [GCLOCK] Detected quick name change for ${event.threadID} -> will revert after ${GROUP_NAME_REVERT_DELAY/1000}s`);
               }
-              // We rely on the poller interval to actually do the revert after delay
             }
           }
 
@@ -494,15 +514,22 @@ async function loginAndRun() {
 
         } catch (e) {
           if ((e && e.message) === "FORCE_RECONNECT") throw e;
-          warn("Event handler caught error:", e.message || e);
+          warn("Event handler caught error:", e && e.message ? e.message : e);
         }
       }); // end listenMqtt
 
       // login succeeded; reset attempts
       loginAttempts = 0;
-      break; // stay logged in and let intervals/listener run
+
+      // stay logged in and let intervals/listener run
+      break;
     } catch (e) {
-      error(`[${timestamp()}] Login/Run error:`, e.message || e);
+      // better error message for login problems
+      if (e && e.error) {
+        error(`[${timestamp()}] Login/Run error:`, JSON.stringify(e).slice(0, 800));
+      } else {
+        error(`[${timestamp()}] Login/Run error:`, e && e.message ? e.message : e);
+      }
       const backoff = Math.min(60, (loginAttempts + 1) * 5);
       info(`Retrying login in ${backoff}s...`);
       await sleep(backoff * 1000);
@@ -511,7 +538,7 @@ async function loginAndRun() {
 }
 
 // Start bot
-loginAndRun().catch((e) => { error("Fatal start error:", e.message || e); process.exit(1); });
+loginAndRun().catch((e) => { error("Fatal start error:", e && e.message ? e.message : e); process.exit(1); });
 
 // Global handlers
 process.on("uncaughtException", (err) => {
@@ -520,7 +547,7 @@ process.on("uncaughtException", (err) => {
   setTimeout(() => loginAndRun().catch(e=>error("relogin after exception failed:", e.message || e)), 5000);
 });
 process.on("unhandledRejection", (reason) => {
-  warn("unhandledRejection:", reason);
+  warn("unhandledRejection:", reason && reason.message ? reason.message : reason);
   setTimeout(() => loginAndRun().catch(e=>error("relogin after rejection failed:", e.message || e)), 5000);
 });
 
