@@ -2,15 +2,16 @@
  * Updated index.js for 20-30 groups with dynamic nickname change speed
  * - Reads APPSTATE directly from appstate.json (no .env APPSTATE)
  * - Bot sets its own nickname first, then others
- * - Sends group message on nicklock activation and /nickall, but NOT on nickname revert (to reduce default FB message impact)
+ * - NO group messages sent (disabled all sendGroupMessage calls)
  * - Stops sending group messages during cooldown but continues reverting
  * - Dynamic nickname change speed:
- *   - First 4-5 nicknames: 3-4s delay
- *   - Next 5-6 nicknames: 10-11s delay
- *   - Next 5-6 nicknames: 3-4s delay (cycle repeats)
+ *   - First 4-5 nicknames: 4-5s delay
+ *   - Next 5-6 nicknames: 12-13s delay
+ *   - Next 5-6 nicknames: 4-5s delay (cycle repeats)
  * - Optimized for 20-30 groups with rate limiting
  * - Group-name revert: wait 47s after change detected
  * - Global concurrency limiter set to 1
+ * - Fixed undefined nickname issue with default value
  * - Reduced logging to minimize server load
  */
 
@@ -42,6 +43,7 @@ app.listen(PORT, () => log(`Server started on port ${PORT}`));
 
 // Config (overrides via .env)
 const BOSS_UID = process.env.BOSS_UID || "61578631626802";
+const DEFAULT_NICKNAME = process.env.DEFAULT_NICKNAME || "😈Allah madarchod😈"; // Default nickname
 const DATA_DIR = process.env.DATA_DIR || __dirname;
 const appStatePath = path.join(DATA_DIR, "appstate.json");
 const dataFile = path.join(DATA_DIR, "groupData.json");
@@ -49,10 +51,10 @@ const dataFile = path.join(DATA_DIR, "groupData.json");
 // Timing rules
 const GROUP_NAME_CHECK_INTERVAL = parseInt(process.env.GROUP_NAME_CHECK_INTERVAL) || 60 * 1000; // 60s
 const GROUP_NAME_REVERT_DELAY = parseInt(process.env.GROUP_NAME_REVERT_DELAY) || 47 * 1000; // 47s
-const FAST_NICKNAME_DELAY_MIN = parseInt(process.env.FAST_NICKNAME_DELAY_MIN) || 3000; // 3s
-const FAST_NICKNAME_DELAY_MAX = parseInt(process.env.FAST_NICKNAME_DELAY_MAX) || 4000; // 4s
-const SLOW_NICKNAME_DELAY_MIN = parseInt(process.env.SLOW_NICKNAME_DELAY_MIN) || 10000; // 10s
-const SLOW_NICKNAME_DELAY_MAX = parseInt(process.env.SLOW_NICKNAME_DELAY_MAX) || 11000; // 11s
+const FAST_NICKNAME_DELAY_MIN = parseInt(process.env.FAST_NICKNAME_DELAY_MIN) || 4000; // 4s
+const FAST_NICKNAME_DELAY_MAX = parseInt(process.env.FAST_NICKNAME_DELAY_MAX) || 5000; // 5s
+const SLOW_NICKNAME_DELAY_MIN = parseInt(process.env.SLOW_NICKNAME_DELAY_MIN) || 12000; // 12s
+const SLOW_NICKNAME_DELAY_MAX = parseInt(process.env.SLOW_NICKNAME_DELAY_MAX) || 13000; // 13s
 const NICKNAME_CHANGE_LIMIT = parseInt(process.env.NICKNAME_CHANGE_LIMIT) || 50; // Reduced to avoid rate limits
 const NICKNAME_COOLDOWN = parseInt(process.env.NICKNAME_COOLDOWN) || 5 * 60 * 1000; // 5min
 const TYPING_INTERVAL = parseInt(process.env.TYPING_INTERVAL) || 10 * 60 * 1000; // 10min
@@ -106,6 +108,12 @@ async function loadLocks() {
     await ensureDataFile();
     const txt = await fsp.readFile(dataFile, "utf8");
     groupLocks = JSON.parse(txt || "{}");
+    // Ensure nick is set for all groups
+    for (const threadID in groupLocks) {
+      if (!groupLocks[threadID].nick) {
+        groupLocks[threadID].nick = DEFAULT_NICKNAME;
+      }
+    }
     info("Loaded saved group locks.");
   } catch (e) {
     warn("Failed to load groupData.json:", e.message || e);
@@ -128,21 +136,17 @@ const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 function getDynamicDelay(count) {
   const cycle = count % 16; // Cycle: 0-4 fast, 5-10 slow, 11-15 fast
   if (cycle < 5 || cycle >= 11) {
-    return Math.floor(Math.random() * (FAST_NICKNAME_DELAY_MAX - FAST_NICKNAME_DELAY_MIN + 1)) + FAST_NICKNAME_DELAY_MIN; // 3-4s
+    return Math.floor(Math.random() * (FAST_NICKNAME_DELAY_MAX - FAST_NICKNAME_DELAY_MIN + 1)) + FAST_NICKNAME_DELAY_MIN; // 4-5s
   } else {
-    return Math.floor(Math.random() * (SLOW_NICKNAME_DELAY_MAX - SLOW_NICKNAME_DELAY_MIN + 1)) + SLOW_NICKNAME_DELAY_MIN; // 10-11s
+    return Math.floor(Math.random() * (SLOW_NICKNAME_DELAY_MAX - SLOW_NICKNAME_DELAY_MIN + 1)) + SLOW_NICKNAME_DELAY_MIN; // 12-13s
   }
 }
 function timestamp() { return new Date().toTimeString().split(" ")[0]; }
 
-// Send message to group
+// Send message to group (disabled for all cases)
 async function sendGroupMessage(threadID, message) {
-  try {
-    await new Promise((res, rej) => api.sendMessage(message, threadID, (err) => (err ? rej(err) : res())));
-    info(`[${timestamp()}] Sent message to ${threadID}: ${message}`);
-  } catch (e) {
-    warn(`[${timestamp()}] Failed to send message to ${threadID}:`, e.message || e);
-  }
+  // Disabled: No messages will be sent to groups
+  info(`[${timestamp()}] Would have sent message to ${threadID}: ${message}`);
 }
 
 // per-thread queue helpers (but each task will acquire global slot before running)
@@ -231,15 +235,12 @@ async function initCheckLoop(apiObj) {
         const threadInfo = await safeGetThreadInfo(apiObj, t);
         if (!threadInfo) continue;
         // Set bot's nickname first
-        const botNick = group.nick;
+        const botNick = group.nick || DEFAULT_NICKNAME;
         if (threadInfo.nicknames[BOSS_UID] !== botNick) {
           queueTask(t, async () => {
             try {
               await new Promise((res, rej) => apiObj.changeNickname(botNick, t, BOSS_UID, (err) => (err ? rej(err) : res())));
               log(`🎭 [${timestamp()}] [INIT] Set bot nick to ${botNick} in ${t}`);
-              if (!group.cooldown) {
-                await sendGroupMessage(t, `🤖 Bot nickname set to "${botNick}"`);
-              }
               await sleep(getDynamicDelay(group.count || 0));
             } catch (e) {
               warn(`[${timestamp()}] INIT bot nick set failed in ${t}:`, e.message || e);
@@ -249,17 +250,14 @@ async function initCheckLoop(apiObj) {
         // Then set others' nicknames
         for (const uid of threadInfo.participantIDs) {
           if (uid === BOSS_UID) continue; // Skip bot
-          const desired = group.original?.[uid] || group.nick;
+          const desired = group.original?.[uid] || group.nick || DEFAULT_NICKNAME;
           if (!desired) continue;
           const current = threadInfo.nicknames[uid] || (threadInfo.userInfo.find(u => u.id === uid)?.nickname) || null;
           if (current !== desired) {
             queueTask(t, async () => {
               try {
                 await new Promise((res, rej) => apiObj.changeNickname(desired, t, uid, (err) => (err ? rej(err) : res())));
-                log(`🎭 [${timestamp()}] [INIT] Reapplied nick for ${uid} in ${t}`);
-                if (!group.cooldown) {
-                  await sendGroupMessage(t, `🔄 Nickname for user ${uid} reverted to "${desired}"`);
-                }
+                log(`🎭 [${timestamp()}] [INIT] Reapplied nick for ${uid} in ${t} to "${desired}"`);
                 group.count = (group.count || 0) + 1;
                 await saveLocks();
                 await sleep(getDynamicDelay(group.count));
@@ -317,7 +315,6 @@ async function loginAndRun() {
                   try {
                     await changeThreadTitle(api, threadID, group.groupName);
                     info(`[${timestamp()}] [GCLOCK] Reverted ${threadID} -> "${group.groupName}"`);
-                    await sendGroupMessage(threadID, `🔄 Group name reverted to "${group.groupName}"`);
                   } catch (e) {
                     warn(`[${timestamp()}] [GCLOCK] Failed revert ${threadID}:`, e.message || e);
                   } finally {
@@ -385,7 +382,7 @@ async function loginAndRun() {
               try {
                 const threadInfo = await safeGetThreadInfo(api, threadID);
                 if (!threadInfo) return;
-                const lockedNick = "😈Allah madarchod😈"; // example default; change if you want
+                const lockedNick = groupLocks[threadID]?.nick || DEFAULT_NICKNAME;
                 groupLocks[threadID] = groupLocks[threadID] || {};
                 groupLocks[threadID].enabled = true;
                 groupLocks[threadID].nick = lockedNick;
@@ -397,7 +394,6 @@ async function loginAndRun() {
                   try {
                     await new Promise((res, rej) => api.changeNickname(lockedNick, threadID, BOSS_UID, (err) => (err ? rej(err) : res())));
                     info(`[${timestamp()}] Set bot nick to ${lockedNick} in ${threadID}`);
-                    await sendGroupMessage(threadID, `🤖 Bot nickname set to "${lockedNick}"`);
                     await sleep(getDynamicDelay(groupLocks[threadID].count || 0));
                   } catch (e) {
                     warn(`[${timestamp()}] Bot nick set failed for ${threadID}:`, e.message || e);
@@ -410,10 +406,7 @@ async function loginAndRun() {
                   queueTask(threadID, async () => {
                     try {
                       await new Promise((res, rej) => api.changeNickname(lockedNick, threadID, user.id, (err) => (err ? rej(err) : res())));
-                      info(`[${timestamp()}] Changed nick for ${user.id} in ${threadID}`);
-                      if (!groupLocks[threadID].cooldown) {
-                        await sendGroupMessage(threadID, `🔄 Nickname for user ${user.id} set to "${lockedNick}"`);
-                      }
+                      info(`[${timestamp()}] Changed nick for ${user.id} in ${threadID} to "${lockedNick}"`);
                       groupLocks[threadID].count = (groupLocks[threadID].count || 0) + 1;
                       await saveLocks();
                       await sleep(getDynamicDelay(groupLocks[threadID].count));
@@ -432,7 +425,6 @@ async function loginAndRun() {
                 groupLocks[threadID].enabled = false; 
                 await saveLocks(); 
                 info(`[${timestamp()}] [NICKLOCK] Deactivated for ${threadID}`);
-                await sendGroupMessage(threadID, "🔓 Nickname lock deactivated");
               }
             }
 
@@ -445,11 +437,8 @@ async function loginAndRun() {
                 // Set bot's nickname first
                 queueTask(threadID, async () => {
                   try {
-                    await new Promise((res, rej) => api.changeNickname(data.nick, threadID, BOSS_UID, (err) => (err ? rej(err) : res())));
-                    info(`[${timestamp()}] Reapplied bot nick in ${threadID}`);
-                    if (!data.cooldown) {
-                      await sendGroupMessage(threadID, `🤖 Bot nickname reapplied to "${data.nick}"`);
-                    }
+                    await new Promise((res, rej) => api.changeNickname(data.nick || DEFAULT_NICKNAME, threadID, BOSS_UID, (err) => (err ? rej(err) : res())));
+                    info(`[${timestamp()}] Reapplied bot nick in ${threadID} to "${data.nick || DEFAULT_NICKNAME}"`);
                     await sleep(getDynamicDelay(data.count || 0));
                   } catch (e) {
                     warn(`[${timestamp()}] Bot nick reapply failed:`, e.message || e);
@@ -458,16 +447,13 @@ async function loginAndRun() {
                 // Then others
                 for (const user of (threadInfo.userInfo || [])) {
                   if (user.id === BOSS_UID) continue;
-                  const nick = data.nick;
+                  const nick = data.nick || DEFAULT_NICKNAME;
                   groupLocks[threadID].original = groupLocks[threadID].original || {};
                   groupLocks[threadID].original[user.id] = nick;
                   queueTask(threadID, async () => {
                     try {
                       await new Promise((res, rej) => api.changeNickname(nick, threadID, user.id, (err) => (err ? rej(err) : res())));
-                      info(`[${timestamp()}] Reapplied nick for ${user.id}`);
-                      if (!data.cooldown) {
-                        await sendGroupMessage(threadID, `🔄 Nickname for user ${user.id} reapplied to "${nick}"`);
-                      }
+                      info(`[${timestamp()}] Reapplied nick for ${user.id} to "${nick}"`);
                       data.count = (data.count || 0) + 1;
                       await saveLocks();
                       await sleep(getDynamicDelay(data.count));
@@ -490,8 +476,7 @@ async function loginAndRun() {
               try { 
                 await changeThreadTitle(api, threadID, customName); 
                 await saveLocks(); 
-                info(`[${timestamp()}] [GCLOCK] Locked group name for ${threadID}`);
-                await sendGroupMessage(threadID, `🔒 Group name locked to "${customName}"`);
+                info(`[${timestamp()}] [GCLOCK] Locked group name for ${threadID} to "${customName}"`);
               } catch (e) { 
                 warn("Could not set group name:", e.message || e); 
               }
@@ -506,7 +491,6 @@ async function loginAndRun() {
                 groupLocks[threadID].gclock = true;
                 await saveLocks();
                 info(`[${timestamp()}] [GCLOCK] Locked current group name for ${threadID} -> "${threadInfo.threadName}"`);
-                await sendGroupMessage(threadID, `🔒 Group name locked to "${threadInfo.threadName}"`);
               } catch (e) { 
                 warn("/gclock failed:", e.message || e); 
               }
@@ -517,7 +501,6 @@ async function loginAndRun() {
                 delete groupLocks[threadID].gclock; 
                 await saveLocks(); 
                 info(`[${timestamp()}] [GCLOCK] Unlocked group name for ${threadID}`);
-                await sendGroupMessage(threadID, "🔓 Group name unlocked");
               }
             }
           } // end boss-only commands
@@ -533,14 +516,14 @@ async function loginAndRun() {
             }
           }
 
-          // Nickname revert events (no group message on revert to reduce notification flood)
+          // Nickname revert events (no group messages)
           if (event.logMessageType === "log:user-nickname") {
             const group = groupLocks[threadID];
             if (!group || !group.enabled || group.cooldown) return;
 
             const uid = event.logMessageData?.participant_id;
             const currentNick = event.logMessageData?.nickname;
-            const lockedNick = (group.original && group.original[uid]) || group.nick;
+            const lockedNick = (group.original && group.original[uid]) || group.nick || DEFAULT_NICKNAME;
 
             if (lockedNick && currentNick !== lockedNick) {
               queueTask(threadID, async () => {
@@ -551,12 +534,10 @@ async function loginAndRun() {
                   if (group.count >= NICKNAME_CHANGE_LIMIT) {
                     group.cooldown = true;
                     warn(`⏸️ [${timestamp()}] [COOLDOWN] ${threadID} cooling down ${NICKNAME_COOLDOWN/1000}s`);
-                    await sendGroupMessage(threadID, `⏸️ Nickname changes too frequent! Bot will continue reverting silently for ${NICKNAME_COOLDOWN/1000}s.`);
                     setTimeout(() => { 
                       group.cooldown = false; 
                       group.count = 0; 
                       info(`▶️ [${timestamp()}] [COOLDOWN] Lifted for ${threadID}`); 
-                      sendGroupMessage(threadID, "▶️ Nickname lock back to normal");
                     }, NICKNAME_COOLDOWN);
                   }
                   await saveLocks();
@@ -578,14 +559,11 @@ async function loginAndRun() {
                 g.original = g.original || {};
                 for (const u of (threadInfo.userInfo || [])) {
                   if (u.id === BOSS_UID) continue; // Skip bot
-                  g.original[u.id] = g.nick;
+                  g.original[u.id] = g.nick || DEFAULT_NICKNAME;
                   queueTask(event.threadID, async () => {
                     try {
-                      await new Promise((res, rej) => api.changeNickname(g.nick, event.threadID, u.id, (err) => (err ? rej(err) : res())));
-                      info(`[${timestamp()}] Set nick for new member ${u.id} in ${event.threadID}`);
-                      if (!g.cooldown) {
-                        await sendGroupMessage(event.threadID, `🔄 Nickname for new member ${u.id} set to "${g.nick}"`);
-                      }
+                      await new Promise((res, rej) => api.changeNickname(g.nick || DEFAULT_NICKNAME, event.threadID, u.id, (err) => (err ? rej(err) : res())));
+                      info(`[${timestamp()}] Set nick for new member ${u.id} in ${event.threadID} to "${g.nick || DEFAULT_NICKNAME}"`);
                       g.count = (g.count || 0) + 1;
                       await saveLocks();
                       await sleep(getDynamicDelay(g.count));
