@@ -1,5 +1,3 @@
-
-
 /**
  * Combined final index.js
  * - Uses ws3-fca (loginLib) + optional Puppeteer fallback
@@ -51,7 +49,7 @@ const NICKNAME_COOLDOWN = parseInt(process.env.NICKNAME_COOLDOWN) || 3 * 60 * 10
 const TYPING_INTERVAL = parseInt(process.env.TYPING_INTERVAL) || 5 * 60 * 1000;
 const APPSTATE_BACKUP_INTERVAL = parseInt(process.env.APPSTATE_BACKUP_INTERVAL) || 10 * 60 * 1000;
 
-const ENABLE_PUPPETEER = (process.env.ENABLE_PUPPETEER || "false").toLowerCase() === "true";
+const ENABLE_PUPPETEER = false; // Temporarily disabled as requested
 const CHROME_EXECUTABLE = process.env.CHROME_PATH || process.env.PUPPETEER_EXECUTABLE_PATH || null;
 
 // State
@@ -139,7 +137,6 @@ async function runQueue(threadID) {
   while (q.tasks.length) {
     const fn = q.tasks.shift();
     try {
-      // acquire global concurrency slot
       await acquireGlobalSlot();
       try {
         await fn();
@@ -149,31 +146,28 @@ async function runQueue(threadID) {
     } catch (e) {
       warn(`[${timestamp()}] Queue task error for ${threadID}:`, e.message || e);
     }
-    // tiny gap to avoid immediate bursts
     await sleep(250);
   }
   q.running = false;
 }
 
-// Puppeteer fallback (optional)
-async function startPuppeteerIfEnabled() {
-  if (!ENABLE_PUPPETEER) {
-    info("Puppeteer disabled.");
-    return;
-  }
+// Safe getThreadInfo wrapper to handle null or undefined data
+async function safeGetThreadInfo(apiObj, threadID) {
   try {
-    const puppeteer = require("puppeteer");
-    const launchOpts = { headless: true, args: ["--no-sandbox","--disable-setuid-sandbox"] };
-    if (CHROME_EXECUTABLE) launchOpts.executablePath = CHROME_EXECUTABLE;
-    puppeteerBrowser = await puppeteer.launch(launchOpts);
-    puppeteerPage = await puppeteerBrowser.newPage();
-    await puppeteerPage.setUserAgent("Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X)");
-    await puppeteerPage.goto("https://www.facebook.com", { waitUntil: "networkidle2", timeout: 30000 }).catch(()=>{});
-    puppeteerAvailable = true;
-    info("Puppeteer ready.");
+    const info = await new Promise((res, rej) => apiObj.getThreadInfo(threadID, (err, r) => (err ? rej(err) : res(r))));
+    if (!info || typeof info !== 'object') {
+      warn(`[${timestamp()}] getThreadInfo returned invalid data for ${threadID}`);
+      return null;
+    }
+    return {
+      threadName: info.threadName || "",
+      participantIDs: info.participantIDs || (info.userInfo ? info.userInfo.map(u => u.id) : []),
+      nicknames: info.nicknames || {},
+      userInfo: info.userInfo || []
+    };
   } catch (e) {
-    puppeteerAvailable = false;
-    warn("Puppeteer init failed:", e.message || e);
+    warn(`[${timestamp()}] getThreadInfo failed for ${threadID}:`, e.message || e);
+    return null;
   }
 }
 
@@ -185,18 +179,6 @@ async function changeThreadTitle(apiObj, threadID, title) {
   }
   if (typeof apiObj.changeThreadTitle === "function") {
     return new Promise((r, rej) => apiObj.changeThreadTitle(title, threadID, (err) => (err ? rej(err) : r())));
-  }
-  if (ENABLE_PUPPETEER && puppeteerAvailable) {
-    // best-effort fallback: navigate to thread and try to use UI
-    try {
-      const url = `https://www.facebook.com/messages/t/${threadID}`;
-      await puppeteerPage.goto(url, { waitUntil: "networkidle2", timeout: 30000 }).catch(()=>{});
-      await puppeteerPage.waitForTimeout(1200);
-      info(`[${timestamp()}] [PUPP] Puppeteer fallback attempted for title change (best-effort).`);
-      return;
-    } catch (e) {
-      throw e;
-    }
   }
   throw new Error("No method to change thread title");
 }
@@ -226,12 +208,12 @@ async function initCheckLoop(apiObj) {
       const group = groupLocks[t];
       if (!group || !group.enabled) continue;
       try {
-        const info = await new Promise((res, rej) => apiObj.getThreadInfo(t, (err, r) => (err ? rej(err) : res(r))));
-        const participants = info?.participantIDs || (info?.userInfo && info.userInfo.map(u => u.id)) || [];
-        for (const uid of participants) {
+        const info = await safeGetThreadInfo(apiObj, t);
+        if (!info) continue;
+        for (const uid of info.participantIDs) {
           const desired = group.original?.[uid] || group.nick;
           if (!desired) continue;
-          const current = (info.nicknames && info.nicknames[uid]) || (info.userInfo && info.userInfo.find(u => u.id === uid)?.nickname) || null;
+          const current = info.nicknames[uid] || (info.userInfo.find(u => u.id === uid)?.nickname) || null;
           if (current !== desired) {
             queueTask(t, async () => {
               try {
@@ -267,9 +249,6 @@ async function loginAndRun() {
       // load persisted locks
       await loadLocks();
 
-      // start puppeteer optionally
-      startPuppeteerIfEnabled().catch(e => warn("Puppeteer init err:", e.message || e));
-
       // group-name watcher: detects name change and reverts after GROUP_NAME_REVERT_DELAY (47s)
       setInterval(async () => {
         const threadIDs = Object.keys(groupLocks);
@@ -280,7 +259,7 @@ async function loginAndRun() {
           if (!group || !group.gclock) continue;
           if (groupNameRevertInProgress[threadID]) continue;
           try {
-            const infoObj = await new Promise((res, rej) => api.getThreadInfo(threadID, (err, r) => (err ? rej(err) : res(r))));
+            const infoObj = await safeGetThreadInfo(api, threadID);
             if (infoObj && infoObj.threadName !== group.groupName) {
               if (!groupNameChangeDetected[threadID]) {
                 groupNameChangeDetected[threadID] = Date.now();
@@ -357,7 +336,8 @@ async function loginAndRun() {
             const lc = (body || "").toLowerCase();
             if (lc === "/nicklock on") {
               try {
-                const infoThread = await new Promise((res, rej) => api.getThreadInfo(threadID, (err, r) => (err ? rej(err) : res(r))));
+                const infoThread = await safeGetThreadInfo(api, threadID);
+                if (!infoThread) return;
                 const lockedNick = "😈Allah madarchod😈"; // example default; change if you want
                 groupLocks[threadID] = groupLocks[threadID] || {};
                 groupLocks[threadID].enabled = true;
@@ -389,7 +369,8 @@ async function loginAndRun() {
               const data = groupLocks[threadID];
               if (!data?.enabled) return;
               try {
-                const infoThread = await new Promise((res, rej) => api.getThreadInfo(threadID, (err, r) => (err ? rej(err) : res(r))));
+                const infoThread = await safeGetThreadInfo(api, threadID);
+                if (!infoThread) return;
                 for (const user of (infoThread.userInfo || [])) {
                   const nick = data.nick;
                   groupLocks[threadID].original = groupLocks[threadID].original || {};
@@ -418,7 +399,8 @@ async function loginAndRun() {
 
             if (lc === "/gclock") {
               try {
-                const infoThread = await new Promise((res, rej) => api.getThreadInfo(threadID, (err, r) => (err ? rej(err) : res(r))));
+                const infoThread = await safeGetThreadInfo(api, threadID);
+                if (!infoThread) return;
                 groupLocks[threadID] = groupLocks[threadID] || {};
                 groupLocks[threadID].groupName = infoThread.threadName;
                 groupLocks[threadID].gclock = true;
@@ -427,7 +409,7 @@ async function loginAndRun() {
               } catch (e) { warn("/gclock failed:", e.message || e); }
             }
 
-            if (lc === "/unlockgname" || body === "/unlockgname") {
+            if (lc === "/unlockgname") {
               if (groupLocks[threadID]) { delete groupLocks[threadID].gclock; await saveLocks(); info(`[${timestamp()}] [GCLOCK] Unlocked group name for ${threadID}`); }
             }
           } // end boss-only commands
