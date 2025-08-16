@@ -10,6 +10,7 @@
  * - Rate limit protection with auto-pause
  * - Keepalive ping to prevent server sleep
  * - Global concurrency limiter set to 1
+ * - Improved /gclock command reliability
  */
 
 const fs = require("fs");
@@ -164,7 +165,7 @@ async function runQueue(threadID) {
   q.running = false;
 }
 
-async function safeGetThreadInfo(apiObj, threadID, maxRetries = 3) {
+async function safeGetThreadInfo(apiObj, threadID, maxRetries = 5) {
   let retries = 0;
   while (retries < maxRetries) {
     try {
@@ -180,21 +181,33 @@ async function safeGetThreadInfo(apiObj, threadID, maxRetries = 3) {
       };
     } catch (e) {
       retries++;
+      log(`[DEBUG] Failed to get thread info for ${threadID}, retry ${retries}/${maxRetries}: ${e.message || e}`);
       if (retries === maxRetries) return null;
-      await sleep(2000 * retries); // Exponential backoff
+      await sleep(3000 * retries); // Exponential backoff
     }
   }
 }
 
-async function changeThreadTitle(apiObj, threadID, title) {
+async function changeThreadTitle(apiObj, threadID, title, maxRetries = 3) {
   if (!apiObj) throw new Error("No api");
-  if (typeof apiObj.setTitle === "function") {
-    return new Promise((r, rej) => apiObj.setTitle(title, threadID, (err) => (err ? rej(err) : r())));
+  let retries = 0;
+  while (retries < maxRetries) {
+    try {
+      if (typeof apiObj.setTitle === "function") {
+        await new Promise((r, rej) => apiObj.setTitle(title, threadID, (err) => (err ? rej(err) : r())));
+      } else if (typeof apiObj.changeThreadTitle === "function") {
+        await new Promise((r, rej) => apiObj.changeThreadTitle(title, threadID, (err) => (err ? rej(err) : r())));
+      } else {
+        throw new Error("No method to change thread title");
+      }
+      return;
+    } catch (e) {
+      retries++;
+      log(`[DEBUG] Failed to change title for ${threadID}, retry ${retries}/${maxRetries}: ${e.message || e}`);
+      if (retries === maxRetries) throw e;
+      await sleep(2000 * retries); // Exponential backoff
+    }
   }
-  if (typeof apiObj.changeThreadTitle === "function") {
-    return new Promise((r, rej) => apiObj.changeThreadTitle(title, threadID, (err) => (err ? rej(err) : r())));
-  }
-  throw new Error("No method to change thread title");
 }
 
 async function loadAppState() {
@@ -340,7 +353,7 @@ async function loginAndRun() {
             const lc = (body || "").toLowerCase();
             if (lc === "/nicklock on") {
               try {
-                const threadInfo = await safeGetThreadInfo(api, threadID, 3); // Retry up to 3 times
+                const threadInfo = await safeGetThreadInfo(api, threadID, 5);
                 if (!threadInfo) {
                   log(`[ERROR] Failed to load thread info for ${threadID}`);
                   return;
@@ -387,7 +400,7 @@ async function loginAndRun() {
               const data = groupLocks[threadID];
               if (!data?.enabled) return;
               try {
-                const threadInfo = await safeGetThreadInfo(api, threadID, 3);
+                const threadInfo = await safeGetThreadInfo(api, threadID, 5);
                 if (!threadInfo) return;
                 queueTask(threadID, async () => {
                   try {
@@ -416,29 +429,45 @@ async function loginAndRun() {
             }
             if (lc.startsWith("/gclock ")) {
               const customName = body.slice(8).trim();
-              if (!customName) return;
+              if (!customName) {
+                log(`[DEBUG] /gclock with empty name for ${threadID}`);
+                return;
+              }
               groupLocks[threadID] = groupLocks[threadID] || {};
               groupLocks[threadID].groupName = customName;
               groupLocks[threadID].gclock = true;
-              try { 
-                await changeThreadTitle(api, threadID, customName); 
-                await saveLocks(); 
-              } catch (e) {}
+              try {
+                log(`[DEBUG] Attempting to set group name to ${customName} for ${threadID}`);
+                await changeThreadTitle(api, threadID, customName);
+                await saveLocks();
+                log(`[SUCCESS] Locked ${threadID} to "${customName}"`);
+              } catch (e) {
+                log(`[ERROR] Failed to set group name for ${threadID}: ${e.message || e}`);
+              }
             }
             if (lc === "/gclock") {
               try {
-                const threadInfo = await safeGetThreadInfo(api, threadID, 3);
-                if (!threadInfo) return;
+                const threadInfo = await safeGetThreadInfo(api, threadID, 5);
+                if (!threadInfo) {
+                  log(`[ERROR] Failed to load thread info for ${threadID}`);
+                  return;
+                }
                 groupLocks[threadID] = groupLocks[threadID] || {};
                 groupLocks[threadID].groupName = threadInfo.threadName;
                 groupLocks[threadID].gclock = true;
+                log(`[DEBUG] Attempting to lock ${threadID} to "${threadInfo.threadName}"`);
+                await changeThreadTitle(api, threadID, threadInfo.threadName);
                 await saveLocks();
-              } catch (e) {}
+                log(`[SUCCESS] Locked ${threadID} to "${threadInfo.threadName}"`);
+              } catch (e) {
+                log(`[ERROR] /gclock failed for ${threadID}: ${e.message || e}`);
+              }
             }
             if (lc === "/unlockgname") {
               if (groupLocks[threadID]) { 
                 delete groupLocks[threadID].gclock; 
                 await saveLocks(); 
+                log(`[SUCCESS] Unlocked ${threadID}`);
               }
             }
           }
@@ -483,7 +512,7 @@ async function loginAndRun() {
             const g = groupLocks[event.threadID];
             if (g && g.enabled) {
               try {
-                const threadInfo = await safeGetThreadInfo(api, event.threadID, 3);
+                const threadInfo = await safeGetThreadInfo(api, event.threadID, 5);
                 if (!threadInfo) return;
                 g.original = g.original || {};
                 for (const u of threadInfo.userInfo || []) {
