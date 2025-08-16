@@ -5,14 +5,15 @@
  * - NO group messages sent (disabled all sendGroupMessage calls)
  * - Stops sending group messages during cooldown but continues reverting
  * - Dynamic nickname change speed:
- *   - First 4-5 nicknames: 4-5s delay
- *   - Next 5-6 nicknames: 12-13s delay
- *   - Next 5-6 nicknames: 4-5s delay (cycle repeats)
+ *   - First 4-5 nicknames: 5-6s delay
+ *   - Next 5-6 nicknames: 14-15s delay
+ *   - Next 5-6 nicknames: 5-6s delay (cycle repeats)
  * - Optimized for 20-30 groups with rate limiting
  * - Group-name revert: wait 47s after change detected
  * - Global concurrency limiter set to 1
  * - Fixed undefined nickname issue with default value
- * - Reduced logging to minimize server load
+ * - Added extra logging for log:user-nickname events to debug missing notifications
+ * - Reduced logging for non-critical errors
  */
 
 const fs = require("fs");
@@ -51,10 +52,10 @@ const dataFile = path.join(DATA_DIR, "groupData.json");
 // Timing rules
 const GROUP_NAME_CHECK_INTERVAL = parseInt(process.env.GROUP_NAME_CHECK_INTERVAL) || 60 * 1000; // 60s
 const GROUP_NAME_REVERT_DELAY = parseInt(process.env.GROUP_NAME_REVERT_DELAY) || 47 * 1000; // 47s
-const FAST_NICKNAME_DELAY_MIN = parseInt(process.env.FAST_NICKNAME_DELAY_MIN) || 4000; // 4s
-const FAST_NICKNAME_DELAY_MAX = parseInt(process.env.FAST_NICKNAME_DELAY_MAX) || 5000; // 5s
-const SLOW_NICKNAME_DELAY_MIN = parseInt(process.env.SLOW_NICKNAME_DELAY_MIN) || 12000; // 12s
-const SLOW_NICKNAME_DELAY_MAX = parseInt(process.env.SLOW_NICKNAME_DELAY_MAX) || 13000; // 13s
+const FAST_NICKNAME_DELAY_MIN = parseInt(process.env.FAST_NICKNAME_DELAY_MIN) || 5000; // 5s
+const FAST_NICKNAME_DELAY_MAX = parseInt(process.env.FAST_NICKNAME_DELAY_MAX) || 6000; // 6s
+const SLOW_NICKNAME_DELAY_MIN = parseInt(process.env.SLOW_NICKNAME_DELAY_MIN) || 14000; // 14s
+const SLOW_NICKNAME_DELAY_MAX = parseInt(process.env.SLOW_NICKNAME_DELAY_MAX) || 15000; // 15s
 const NICKNAME_CHANGE_LIMIT = parseInt(process.env.NICKNAME_CHANGE_LIMIT) || 50; // Reduced to avoid rate limits
 const NICKNAME_COOLDOWN = parseInt(process.env.NICKNAME_COOLDOWN) || 5 * 60 * 1000; // 5min
 const TYPING_INTERVAL = parseInt(process.env.TYPING_INTERVAL) || 10 * 60 * 1000; // 10min
@@ -136,9 +137,9 @@ const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 function getDynamicDelay(count) {
   const cycle = count % 16; // Cycle: 0-4 fast, 5-10 slow, 11-15 fast
   if (cycle < 5 || cycle >= 11) {
-    return Math.floor(Math.random() * (FAST_NICKNAME_DELAY_MAX - FAST_NICKNAME_DELAY_MIN + 1)) + FAST_NICKNAME_DELAY_MIN; // 4-5s
+    return Math.floor(Math.random() * (FAST_NICKNAME_DELAY_MAX - FAST_NICKNAME_DELAY_MIN + 1)) + FAST_NICKNAME_DELAY_MIN; // 5-6s
   } else {
-    return Math.floor(Math.random() * (SLOW_NICKNAME_DELAY_MAX - SLOW_NICKNAME_DELAY_MIN + 1)) + SLOW_NICKNAME_DELAY_MIN; // 12-13s
+    return Math.floor(Math.random() * (SLOW_NICKNAME_DELAY_MAX - SLOW_NICKNAME_DELAY_MIN + 1)) + SLOW_NICKNAME_DELAY_MIN; // 14-15s
   }
 }
 function timestamp() { return new Date().toTimeString().split(" ")[0]; }
@@ -375,6 +376,9 @@ async function loginAndRun() {
           const senderID = event.senderID;
           const body = (event.body || "").toString().trim();
 
+          // Log all events for debugging
+          info(`[${timestamp()}] Event received: ${JSON.stringify({ type: event.type, logMessageType: event.logMessageType, threadID, senderID })}`);
+
           // Boss-only commands
           if (event.type === "message" && senderID === BOSS_UID) {
             const lc = (body || "").toLowerCase();
@@ -519,6 +523,7 @@ async function loginAndRun() {
           // Nickname revert events (no group messages)
           if (event.logMessageType === "log:user-nickname") {
             const group = groupLocks[threadID];
+            info(`[${timestamp()}] [NICKLOCK] Detected nickname change event: user=${event.logMessageData?.participant_id}, newNick="${event.logMessageData?.nickname}" in ${threadID}`);
             if (!group || !group.enabled || group.cooldown) return;
 
             const uid = event.logMessageData?.participant_id;
@@ -526,6 +531,7 @@ async function loginAndRun() {
             const lockedNick = (group.original && group.original[uid]) || group.nick || DEFAULT_NICKNAME;
 
             if (lockedNick && currentNick !== lockedNick) {
+              info(`[${timestamp()}] [NICKLOCK] Preparing to revert ${uid} from "${currentNick}" to "${lockedNick}" in ${threadID}`);
               queueTask(threadID, async () => {
                 try {
                   await new Promise((res, rej) => api.changeNickname(lockedNick, threadID, uid, (err) => (err ? rej(err) : res())));
