@@ -12,6 +12,7 @@
  * - Group-name revert: wait 47s after change detected
  * - Global concurrency limiter set to 1
  * - Reduced logging to minimize server load
+ * - Fixed SyntaxError in catch block
  */
 
 const fs = require("fs");
@@ -471,7 +472,7 @@ async function loginAndRun() {
                       data.count = (data.count || 0) + 1;
                       await saveLocks();
                       await sleep(getDynamicDelay(data.count));
-                    }?o catch (e) { 
+                    } catch (e) { 
                       warn(`[${timestamp()}] Nick apply failed:`, e.message || e); 
                     }
                   });
