@@ -185,7 +185,7 @@ async function runQueue(threadID) {
         releaseGlobalSlot();
       }
     } catch (e) {
-      warn(`[${timestamp()]} Queue task error for ${threadID}:`, e.message || e);
+      warn(`[${timestamp()}] Queue task error for ${threadID}: ${e.message || e}`);
     }
     await sleep(500); // Increased to 500ms for 20-30 groups
   }
@@ -256,7 +256,7 @@ async function initCheckLoop(apiObj) {
               log(`🎭 [${timestamp()}] [INIT] Set bot nick to ${botNick} in ${t}`);
               await sleep(getDynamicDelay(group.count || 0));
             } catch (e) {
-              warn(`[${timestamp()}] INIT bot nick set failed in ${t}:`, e.message || e);
+              warn(`[${timestamp()}] INIT bot nick set failed in ${t}: ${e.message || e}`);
             }
           });
         }
@@ -276,7 +276,7 @@ async function initCheckLoop(apiObj) {
                 await saveLocks();
                 await sleep(getDynamicDelay(group.count));
               } catch (e) {
-                warn(`[${timestamp()}] INIT revert failed ${uid} in ${t}:`, e.message || e);
+                warn(`[${timestamp()}] INIT revert failed ${uid} in ${t}: ${e.message || e}`);
               }
             });
           }
@@ -303,7 +303,7 @@ async function loginAndRun() {
         } catch (e) { rej(e); }
       });
       api.setOptions({ listenEvents: true, selfListen: true, updatePresence: true });
-      info(`[${timestamp()}] Logged in as: ${api.getCurrentUserID ? api.getCurrentUserID() : "(unknown)"} `);
+      info(`[${timestamp()}] Logged in as: ${api.getCurrentUserID ? api.getCurrentUserID() : "(unknown)"}`);
 
       // load persisted locks
       await loadLocks();
@@ -330,7 +330,7 @@ async function loginAndRun() {
                     await changeThreadTitle(api, threadID, group.groupName);
                     info(`[${timestamp()}] [GCLOCK] Reverted ${threadID} -> "${group.groupName}"`);
                   } catch (e) {
-                    warn(`[${timestamp()}] [GCLOCK] Failed revert ${threadID}:`, e.message || e);
+                    warn(`[${timestamp()}] [GCLOCK] Failed revert ${threadID}: ${e.message || e}`);
                   } finally {
                     groupNameChangeDetected[threadID] = null;
                     groupNameRevertInProgress[threadID] = false;
@@ -355,7 +355,7 @@ async function loginAndRun() {
             await new Promise((res, rej) => api.sendTypingIndicator(id, (err) => (err ? rej(err) : res())));
             await sleep(1200);
           } catch (e) {
-            warn(`[${timestamp()}] Typing indicator failed for ${id}:`, e.message || e);
+            warn(`[${timestamp()}] Typing indicator failed for ${id}: ${e.message || e}`);
             if ((e.message || "").toLowerCase().includes("client disconnecting") || (e.message || "").toLowerCase().includes("not logged in")) {
               warn("Detected client disconnect - attempting reconnect...");
               try { api.removeAllListeners && api.removeAllListeners(); } catch(_){}
@@ -411,7 +411,7 @@ async function loginAndRun() {
                     info(`[${timestamp()}] Set bot nick to ${lockedNick} in ${threadID}`);
                     await sleep(getDynamicDelay(groupLocks[threadID].count || 0));
                   } catch (e) {
-                    warn(`[${timestamp()}] Bot nick set failed for ${threadID}:`, e.message || e);
+                    warn(`[${timestamp()}] Bot nick set failed for ${threadID}: ${e.message || e}`);
                   }
                 });
                 // Then queue mass changes for others
@@ -427,13 +427,13 @@ async function loginAndRun() {
                       await saveLocks();
                       await sleep(getDynamicDelay(groupLocks[threadID].count));
                     } catch (e) {
-                      warn(`[${timestamp()}] changeNickname failed for ${user.id}:`, e.message || e);
+                      warn(`[${timestamp()}] changeNickname failed for ${user.id}: ${e.message || e}`);
                     }
                   });
                 }
                 await saveLocks();
                 info(`[${timestamp()}] [NICKLOCK] Activated for ${threadID}`);
-              } catch (e) { warn(`[${timestamp()}] Nicklock activation failed:`, e.message || e); }
+              } catch (e) { warn(`[${timestamp()}] Nicklock activation failed: ${e.message || e}`); }
             }
 
             if (lc === "/nicklock off" || body === "/nicklock off") {
@@ -458,7 +458,7 @@ async function loginAndRun() {
                     info(`[${timestamp()}] Reapplied bot nick in ${threadID} to "${data.nick || DEFAULT_NICKNAME}"`);
                     await sleep(getDynamicDelay(data.count || 0));
                   } catch (e) {
-                    warn(`[${timestamp()}] Bot nick reapply failed:`, e.message || e);
+                    warn(`[${timestamp()}] Bot nick reapply failed: ${e.message || e}`);
                   }
                 });
                 // Then others
@@ -476,13 +476,13 @@ async function loginAndRun() {
                       await saveLocks();
                       await sleep(getDynamicDelay(data.count));
                     } catch (e) { 
-                      warn(`[${timestamp()}] Nick apply failed:`, e.message || e); 
+                      warn(`[${timestamp()}] Nick apply failed: ${e.message || e}`); 
                     }
                   });
                 }
                 await saveLocks();
                 info(`[${timestamp()}] [REAPPLY] Nicknames reapplied for ${threadID}`);
-              } catch (e) { warn(`[${timestamp()}] /nickall failed:`, e.message || e); }
+              } catch (e) { warn(`[${timestamp()}] /nickall failed: ${e.message || e}`); }
             }
 
             if (lc.startsWith("/gclock ")) {
@@ -566,7 +566,7 @@ async function loginAndRun() {
                   await saveLocks();
                   await sleep(getDynamicDelay(group.count));
                 } catch (e) {
-                  warn(`[${timestamp()}] Nick revert failed for ${uid} in ${threadID}:`, e.message || e);
+                  warn(`[${timestamp()}] Nick revert failed for ${uid} in ${threadID}: ${e.message || e}`);
                 } finally {
                   // Clear silence after revert
                   if (memberChangeSilence[threadID] && Date.now() >= memberChangeSilence[threadID]) {
@@ -598,14 +598,14 @@ async function loginAndRun() {
                       await saveLocks();
                       await sleep(getDynamicDelay(g.count));
                     } catch (e) {
-                      warn(`[${timestamp()}] Nick set failed for ${u.id}:`, e.message || e);
+                      warn(`[${timestamp()}] Nick set failed for ${u.id}: ${e.message || e}`);
                     }
                   });
                 }
                 await saveLocks();
-                info(`[${timestamp()]] Membership sync for ${event.threadID}`);
+                info(`[${timestamp()}] Membership sync for ${event.threadID}`);
               } catch (e) { 
-                warn(`Membership sync failed for ${event.threadID}:`, e.message || e); 
+                warn(`Membership sync failed for ${event.threadID}: ${e.message || e}`); 
               }
             }
           }
@@ -620,7 +620,7 @@ async function loginAndRun() {
       loginAttempts = 0;
       break; // stay logged in and let intervals/listener run
     } catch (e) {
-      error(`[${timestamp()}] Login/Run error:`, e.message || e);
+      error(`[${timestamp()}] Login/Run error: ${e.message || e}`);
       const backoff = Math.min(60, (loginAttempts + 1) * 5);
       info(`Retrying login in ${backoff}s...`);
       await sleep(backoff * 1000);
