@@ -1,8 +1,8 @@
 /**
- * Final index.js for 20-30 groups with dynamic nickname change speed
+ * Updated index.js for 20-30 groups with dynamic nickname change speed
  * - Reads APPSTATE directly from appstate.json (no .env APPSTATE)
  * - Bot sets its own nickname first, then others
- * - Sends group message on each nickname change
+ * - Sends group message on nicklock activation and /nickall, but NOT on nickname revert (to reduce default FB message impact)
  * - Stops sending group messages during cooldown but continues reverting
  * - Dynamic nickname change speed:
  *   - First 4-5 nicknames: 3-4s delay
@@ -12,7 +12,6 @@
  * - Group-name revert: wait 47s after change detected
  * - Global concurrency limiter set to 1
  * - Reduced logging to minimize server load
- * - Fixed SyntaxError in catch block
  */
 
 const fs = require("fs");
@@ -48,17 +47,17 @@ const appStatePath = path.join(DATA_DIR, "appstate.json");
 const dataFile = path.join(DATA_DIR, "groupData.json");
 
 // Timing rules
-const GROUP_NAME_CHECK_INTERVAL = parseInt(process.env.GROUP_NAME_CHECK_INTERVAL) || 30 * 1000; // 30s
+const GROUP_NAME_CHECK_INTERVAL = parseInt(process.env.GROUP_NAME_CHECK_INTERVAL) || 60 * 1000; // 60s
 const GROUP_NAME_REVERT_DELAY = parseInt(process.env.GROUP_NAME_REVERT_DELAY) || 47 * 1000; // 47s
 const FAST_NICKNAME_DELAY_MIN = parseInt(process.env.FAST_NICKNAME_DELAY_MIN) || 3000; // 3s
 const FAST_NICKNAME_DELAY_MAX = parseInt(process.env.FAST_NICKNAME_DELAY_MAX) || 4000; // 4s
 const SLOW_NICKNAME_DELAY_MIN = parseInt(process.env.SLOW_NICKNAME_DELAY_MIN) || 10000; // 10s
 const SLOW_NICKNAME_DELAY_MAX = parseInt(process.env.SLOW_NICKNAME_DELAY_MAX) || 11000; // 11s
-const NICKNAME_CHANGE_LIMIT = parseInt(process.env.NICKNAME_CHANGE_LIMIT) || 100;
+const NICKNAME_CHANGE_LIMIT = parseInt(process.env.NICKNAME_CHANGE_LIMIT) || 50; // Reduced to avoid rate limits
 const NICKNAME_COOLDOWN = parseInt(process.env.NICKNAME_COOLDOWN) || 5 * 60 * 1000; // 5min
 const TYPING_INTERVAL = parseInt(process.env.TYPING_INTERVAL) || 10 * 60 * 1000; // 10min
 const APPSTATE_BACKUP_INTERVAL = parseInt(process.env.APPSTATE_BACKUP_INTERVAL) || 10 * 60 * 1000; // 10min
-const MAX_PER_TICK = parseInt(process.env.MAX_PER_TICK) || 10; // Max 10 groups per check cycle
+const MAX_PER_TICK = parseInt(process.env.MAX_PER_TICK) || 5; // Max 5 groups per check cycle
 
 const ENABLE_PUPPETEER = false; // Disabled as per user request
 const CHROME_EXECUTABLE = process.env.CHROME_PATH || process.env.PUPPETEER_EXECUTABLE_PATH || null;
@@ -534,7 +533,7 @@ async function loginAndRun() {
             }
           }
 
-          // Nickname revert events
+          // Nickname revert events (no group message on revert to reduce notification flood)
           if (event.logMessageType === "log:user-nickname") {
             const group = groupLocks[threadID];
             if (!group || !group.enabled || group.cooldown) return;
@@ -548,10 +547,7 @@ async function loginAndRun() {
                 try {
                   await new Promise((res, rej) => api.changeNickname(lockedNick, threadID, uid, (err) => (err ? rej(err) : res())));
                   group.count = (group.count || 0) + 1;
-                  info(`🎭 [${timestamp()}] [NICKLOCK] Reverted ${uid} in ${threadID}`);
-                  if (!group.cooldown) {
-                    await sendGroupMessage(threadID, `🔄 Nickname for user ${uid} reverted to "${lockedNick}"`);
-                  }
+                  info(`🎭 [${timestamp()}] [NICKLOCK] Reverted ${uid} in ${threadID} to "${lockedNick}"`);
                   if (group.count >= NICKNAME_CHANGE_LIMIT) {
                     group.cooldown = true;
                     warn(`⏸️ [${timestamp()}] [COOLDOWN] ${threadID} cooling down ${NICKNAME_COOLDOWN/1000}s`);
