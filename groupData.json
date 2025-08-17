@@ -1,10 +1,10 @@
 {
   "24137017955931168": {
     "groupName": "ZALIM X RDX",
-    "nick": "😈Allah madarchod😈",  // Default nickname for the group
+    "nick": "😈Allah madarchod😈",
     "original": {
-      "61578631626802": "Boss 😎",  // BOSS_UID ka nickname
-      "100093647281637": "Helper 🤖"  // Dusre user ka nickname
+      "61578631626802": "Boss 😎",
+      "100093647281637": "Helper 🤖"
     },
     "gclock": true,
     "enabled": true,
@@ -13,12 +13,12 @@
   },
   "30545122678464961": {
     "groupName": "Group2",
-    "nick": "😈Allah madarchod😈",  // Default nickname for the group
+    "nick": "😈Allah madarchod😈",
     "original": {
-      "61578631626802": "Admin",  // BOSS_UID ka nickname
-      "100095463782110": "Coder 💻"  // Dusre user ka nickname
+      "61578631626802": "Admin",
+      "100095463782110": "Coder 💻"
     },
-    "gclock": false,
+    "gclock": true,
     "enabled": false,
     "count": 0,
     "cooldown": false
