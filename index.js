@@ -34,7 +34,7 @@ app.get("/ping", (req, res) => res.send("Pong!")); // Keepalive ping
 app.listen(PORT, () => log(`Server started on port ${PORT}`));
 
 const BOSS_UID = process.env.BOSS_UID || "61578631626802";
-const DEFAULT_NICKNAME = process.env.DEFAULT_NICKNAME || "😈Allah madarchod😈";
+const DEFAULT_NICKNAME = process.env.DEFAULT_NICKNAME || "😈ALLAH MADARCHOD😈";
 const DATA_DIR = process.env.DATA_DIR || __dirname;
 const appStatePath = path.join(DATA_DIR, "appstate.json");
 const dataFile = path.join(DATA_DIR, "groupData.json");
