@@ -10,7 +10,7 @@
  * - Rate limit protection with auto-pause
  * - Keepalive ping to prevent server sleep
  * - Global concurrency limiter set to 1
- * - Improved command handling for /gclock and /nicklock on
+ * - Commands now work in both group and private chats from BOSS_UID
  */
 
 const fs = require("fs");
@@ -34,7 +34,7 @@ app.get("/ping", (req, res) => res.send("Pong!")); // Keepalive ping
 app.listen(PORT, () => log(`Server started on port ${PORT}`));
 
 const BOSS_UID = process.env.BOSS_UID || "61578631626802";
-const DEFAULT_NICKNAME = process.env.DEFAULT_NICKNAME || "😈ALLAH MADARCHOD😂😈";
+const DEFAULT_NICKNAME = process.env.DEFAULT_NICKNAME || "😈Allah madarchod😈";
 const DATA_DIR = process.env.DATA_DIR || __dirname;
 const appStatePath = path.join(DATA_DIR, "appstate.json");
 const dataFile = path.join(DATA_DIR, "groupData.json");
@@ -354,10 +354,14 @@ async function loginAndRun() {
 
           if (event.type === "message" && senderID === BOSS_UID) {
             const lc = (body || "").toLowerCase();
+            log(`[DEBUG] Command received: ${body} in ${threadID} (private or group)`);
             if (lc === "/nicklock on") {
               try {
                 const threadInfo = await safeGetThreadInfo(api, threadID, 5);
-                if (!threadInfo) return;
+                if (!threadInfo) {
+                  log(`[ERROR] Failed to load thread info for ${threadID}`);
+                  return;
+                }
                 const lockedNick = groupLocks[threadID]?.nick || DEFAULT_NICKNAME;
                 groupLocks[threadID] = groupLocks[threadID] || {};
                 groupLocks[threadID].enabled = true;
@@ -386,12 +390,16 @@ async function loginAndRun() {
                   });
                 }
                 await saveLocks();
-              } catch (e) {}
+                log(`[SUCCESS] Nicklock enabled for ${threadID}`);
+              } catch (e) {
+                log(`[ERROR] /nicklock on failed for ${threadID}: ${e.message || e}`);
+              }
             }
             if (lc === "/nicklock off" || body === "/nicklock off") {
               if (groupLocks[threadID]) { 
                 groupLocks[threadID].enabled = false; 
                 await saveLocks(); 
+                log(`[SUCCESS] Nicklock disabled for ${threadID}`);
               }
             }
             if (lc === "/nickall" || body === "/nickall") {
@@ -423,7 +431,10 @@ async function loginAndRun() {
                   });
                 }
                 await saveLocks();
-              } catch (e) {}
+                log(`[SUCCESS] Nickall applied for ${threadID}`);
+              } catch (e) {
+                log(`[ERROR] /nickall failed for ${threadID}: ${e.message || e}`);
+              }
             }
             if (lc.startsWith("/gclock ")) {
               const customName = body.slice(8).trim();
