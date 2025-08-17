@@ -10,7 +10,7 @@
  * - Rate limit protection with auto-pause
  * - Keepalive ping to prevent server sleep
  * - Global concurrency limiter set to 1
- * - Improved /gclock command reliability
+ * - Improved command handling for /gclock and /nicklock on
  */
 
 const fs = require("fs");
@@ -238,8 +238,11 @@ async function initCheckLoop(apiObj) {
       const group = groupLocks[t];
       if (!group || !group.enabled) continue;
       try {
-        const threadInfo = await safeGetThreadInfo(apiObj, t);
-        if (!threadInfo) continue;
+        const threadInfo = await safeGetThreadInfo(apiObj, t, 5);
+        if (!threadInfo) {
+          log(`[ERROR] Failed to load thread info for ${t}`);
+          continue;
+        }
         const botNick = group.nick || DEFAULT_NICKNAME;
         if (threadInfo.nicknames[BOSS_UID] !== botNick) {
           queueTask(t, async () => {
@@ -305,7 +308,7 @@ async function loginAndRun() {
               } else if (Date.now() - groupNameChangeDetected[threadID] >= GROUP_NAME_REVERT_DELAY) {
                 groupNameRevertInProgress[threadID] = true;
                 try {
-                  await changeThreadTitle(api, threadID, group.groupName);
+                  await changeThreadTitle(api, threadID, group.groupName, 5); // Retry up to 5 times
                 } catch (e) {} finally {
                   groupNameChangeDetected[threadID] = null;
                   groupNameRevertInProgress[threadID] = false;
@@ -354,10 +357,7 @@ async function loginAndRun() {
             if (lc === "/nicklock on") {
               try {
                 const threadInfo = await safeGetThreadInfo(api, threadID, 5);
-                if (!threadInfo) {
-                  log(`[ERROR] Failed to load thread info for ${threadID}`);
-                  return;
-                }
+                if (!threadInfo) return;
                 const lockedNick = groupLocks[threadID]?.nick || DEFAULT_NICKNAME;
                 groupLocks[threadID] = groupLocks[threadID] || {};
                 groupLocks[threadID].enabled = true;
@@ -386,9 +386,7 @@ async function loginAndRun() {
                   });
                 }
                 await saveLocks();
-              } catch (e) {
-                log(`[ERROR] /nicklock on failed for ${threadID}: ${e.message || e}`);
-              }
+              } catch (e) {}
             }
             if (lc === "/nicklock off" || body === "/nicklock off") {
               if (groupLocks[threadID]) { 
