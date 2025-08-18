@@ -116,26 +116,4 @@
         "creation": "2025-08-18T05:49:17.704Z",
         "lastAccessed": "2025-08-18T05:49:17.704Z"
     }
-        ]        "hostOnly": false,
-        "creation": "2025-08-18T05:32:27.463Z",
-        "lastAccessed": "2025-08-18T05:32:27.463Z"
-    },
-    {
-        "key": "fr",
-        "value": "1eANlrnY0eeOn4jNx.AWfvEhp7vA7UFmarP0eetqy1YT2IAXdZaU8NR3Cr02CRMlch6wM.BooEWe..AAA.0.0.Boorrg.AWejJ3-b4CnIt0q2U6uBuw43qOA",
-        "domain": "facebook.com",
-        "path": "/",
-        "hostOnly": false,
-        "creation": "2025-08-18T05:32:27.463Z",
-        "lastAccessed": "2025-08-18T05:32:27.463Z"
-    },
-    {
-        "key": "xs",
-        "value": "7%3AZRwrqyikZibOcg%3A2%3A1755495137%3A-1%3A-1",
-        "domain": "facebook.com",
-        "path": "/",
-        "hostOnly": false,
-        "creation": "2025-08-18T05:32:27.463Z",
-        "lastAccessed": "2025-08-18T05:32:27.463Z"
-    }
-]
+        ]
