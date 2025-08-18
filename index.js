@@ -41,18 +41,18 @@ const dataFile = path.join(DATA_DIR, "groupData.json");
 
 const GROUP_NAME_CHECK_INTERVAL = parseInt(process.env.GROUP_NAME_CHECK_INTERVAL) || 60 * 1000;
 const GROUP_NAME_REVERT_DELAY = parseInt(process.env.GROUP_NAME_REVERT_DELAY) || 60 * 1000; // Increased to 60s
-const FAST_NICKNAME_DELAY_MIN = parseInt(process.env.FAST_NICKNAME_DELAY_MIN) || 5000; // Increased to 7s
-const FAST_NICKNAME_DELAY_MAX = parseInt(process.env.FAST_NICKNAME_DELAY_MAX) || 7000; // Increased to 10s
-const SLOW_NICKNAME_DELAY_MIN = parseInt(process.env.SLOW_NICKNAME_DELAY_MIN) || 15000; // Increased to 15s
-const SLOW_NICKNAME_DELAY_MAX = parseInt(process.env.SLOW_NICKNAME_DELAY_MAX) || 20000; // Increased to 20s
+const FAST_NICKNAME_DELAY_MIN = parseInt(process.env.FAST_NICKNAME_DELAY_MIN) || 5000; // 7s
+const FAST_NICKNAME_DELAY_MAX = parseInt(process.env.FAST_NICKNAME_DELAY_MAX) || 7000; // 10s
+const SLOW_NICKNAME_DELAY_MIN = parseInt(process.env.SLOW_NICKNAME_DELAY_MIN) || 15000; // 15s
+const SLOW_NICKNAME_DELAY_MAX = parseInt(process.env.SLOW_NICKNAME_DELAY_MAX) || 20000; // 20s
 const NICKNAME_CHANGE_LIMIT = parseInt(process.env.NICKNAME_CHANGE_LIMIT) || 30; // Reduced to 30
 const NICKNAME_COOLDOWN = parseInt(process.env.NICKNAME_COOLDOWN) || 10 * 60 * 1000; // Increased to 10min
 const TYPING_INTERVAL = parseInt(process.env.TYPING_INTERVAL) || 15 * 60 * 1000; // Increased to 15min
 const APPSTATE_BACKUP_INTERVAL = parseInt(process.env.APPSTATE_BACKUP_INTERVAL) || 6 * 60 * 60 * 1000; // 6 hours
-const MAX_PER_TICK = parseInt(process.env.MAX_PER_TICK) || 3; // Reduced to 3
+const MAX_PER_TICK = parseInt(process.env.MAX_PER_TICK) || 1; // Reduced to 1 for testing
 const MEMBER_CHANGE_SILENCE_DURATION = 15 * 1000;
 
-const ENABLE_PUPPETEER = false;
+const ENABLE_PUPPETEER = false; // Keep false, but if needed, enable for appstate generation
 const CHROME_EXECUTABLE = process.env.CHROME_PATH || process.env.PUPPETEER_EXECUTABLE_PATH || null;
 
 let api = null;
@@ -181,6 +181,10 @@ async function safeGetThreadInfo(apiObj, threadID, maxRetries = 5) {
       };
     } catch (e) {
       retries++;
+      if (e.message.includes("429") || e.message.includes("rate limit") || e.message.includes("userID")) {
+        log(`[ERROR] Rate limit or session error for ${threadID}, pausing for 15 minutes`);
+        await sleep(15 * 60 * 1000); // Increased pause
+      }
       log(`[DEBUG] Failed to get thread info for ${threadID}, retry ${retries}/${maxRetries}: ${e.message || e}`);
       if (retries === maxRetries) return null;
       await sleep(3000 * retries); // Exponential backoff
@@ -280,13 +284,20 @@ async function loginAndRun() {
   while (!shuttingDown) {
     try {
       const appState = await loadAppState();
-      log(`Attempt login (attempt ${++loginAttempts})`);
+      log(`Attempt login (attempt ${++loginAttempts}) with appstate snippet: ${JSON.stringify(appState.slice(0, 2))}...`);
       api = await new Promise((res, rej) => {
         try {
-          loginLib({ appState }, (err, a) => (err ? rej(err) : res(a)));
+          // Added forceLogin and userAgent to fix logout issues
+          const loginOptions = {
+            appState,
+            forceLogin: true, // Auto-approve recent logins
+            userAgent: process.env.USER_AGENT || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36', // Custom UA to mimic browser
+            proxy: process.env.PROXY_URL || null // Add proxy if set in .env for trusted IP
+          };
+          loginLib(loginOptions, (err, a) => (err ? rej(err) : res(a)));
         } catch (e) { rej(e); }
       });
-      api.setOptions({ listenEvents: true, selfListen: true, updatePresence: true });
+      api.setOptions({ listenEvents: true, selfListen: false, updatePresence: true }); // Changed selfListen to false to reduce load
       log(`Logged in as: ${api.getCurrentUserID ? api.getCurrentUserID() : "(unknown)"}`);
 
       await loadLocks();
@@ -550,13 +561,16 @@ async function loginAndRun() {
       loginAttempts = 0;
       break;
     } catch (e) {
-      const backoff = Math.min(60, (loginAttempts + 1) * 5);
+      log(`[ERROR] Login failed: ${e.message || e}`);
+      const backoff = Math.min(120, (loginAttempts + 1) * 10); // Increased to max 2 minutes
       await sleep(backoff * 1000);
     }
   }
 }
 
 loginAndRun().catch((e) => { process.exit(1); });
+
+// TIP: If logout persists, temporarily disable 2FA on Facebook account, generate new appstate.json from Firefox browser, and use a residential proxy.
 
 process.on("uncaughtException", (err) => {
   try { if (api && api.removeAllListeners) api.removeAllListeners(); } catch(_){}
