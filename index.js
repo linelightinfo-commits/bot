@@ -1,5 +1,5 @@
 /**
- * Updated index.js for 20+ groups with enhanced stability
+ * Updated index.js for 20+ groups with human-like behavior
  * - Supports proxy/VPN configuration via .env
  * - Prevents nickname and group name changes with strict reverting
  * - Reduced rate limit to avoid blocks (MAX_PER_TICK=1, slower delays)
@@ -111,11 +111,11 @@ async function runQueue(threadID) {
   q.running = false;
 }
 
-async function safeGetThreadInfo(apiObj, threadID, maxRetries = 10) { // Increased retries to 10
+async function safeGetThreadInfo(apiObj, threadID, maxRetries = 10) { // Increased to 10
   let retries = 0;
   while (retries < maxRetries) {
     try {
-      const info = await new Promise((res, rej) => apiObj.getThreadInfo(threadID, (err, r) => (err ? rej(err) : res(r))));
+      const info = await new Promise((res, rej) => apiObj.getThreadInfo(threadID, (err, r) => (err ? rej(err) : res(r)));
       if (!info || typeof info !== 'object') throw new Error("Invalid thread info");
       return {
         threadName: info.threadName || "",
@@ -132,7 +132,7 @@ async function safeGetThreadInfo(apiObj, threadID, maxRetries = 10) { // Increas
   }
 }
 
-async function changeThreadTitle(apiObj, threadID, title, maxRetries = 7) { // Increased retries to 7
+async function changeThreadTitle(apiObj, threadID, title, maxRetries = 7) { // Increased to 7
   if (!apiObj) throw new Error("No api");
   let retries = 0;
   while (retries < maxRetries) {
@@ -160,7 +160,7 @@ async function loadAppState() {
 }
 
 async function refreshAppState() {
-  try { const newAppState = api.getAppState(); await fsp.writeFile(appStatePath, JSON.stringify(newAppState, null, 2)); log("INFO", "Appstate refreshed."); } catch (e) {}
+  try { const newAppState = api.getAppState(); await fsp.writeFile(appStatePath, JSON.stringify(newAppState, null, 2)); log("INFO", "Appstate refreshed."); } catch (e) { log("ERROR", `[ERROR] Appstate refresh failed: ${e.message || e}`); }
 }
 
 async function initCheckLoop(apiObj) {
@@ -248,6 +248,7 @@ async function loginAndRun() {
             } else groupNameChangeDetected[threadID] = null;
           } catch (e) { log("ERROR", `[ERROR] Group name check failed for ${threadID}: ${e.message || e}`); }
         }
+        if (ENABLE_HUMAN_LIKE) await humanLikeActivity();
       }, GROUP_NAME_CHECK_INTERVAL);
 
       setInterval(async () => {
@@ -277,7 +278,7 @@ async function loginAndRun() {
           const eventKey = `${event.logMessageType}_${threadID}_${event.logMessageData?.participant_id || event.logMessageData?.name || ""}`;
           const now = Date.now();
 
-          if (lastEventLog[eventKey] && (now - lastEventLog[eventKey]) < 5000) return;
+          if (lastEventLog[eventKey] && (now - lastEventLog[eventKey]) < 60000) return; // 1min cooldown
           lastEventLog[eventKey] = now;
 
           if (event.logMessageType === "log:user-nickname") {
@@ -301,7 +302,7 @@ async function loginAndRun() {
                     setTimeout(() => { group.cooldown = false; group.count = 0; }, NICKNAME_COOLDOWN);
                   }
                   await saveLocks();
-                  await sleep(getDynamicDelay(group.count));
+                  await sleep(getRandomDelay());
                 } catch (e) { log("ERROR", `[ERROR] Nickname revert failed for ${uid} in ${threadID}: ${e.message || e}`); }
                 finally { if (memberChangeSilence[threadID] && Date.now() >= memberChangeSilence[threadID]) delete memberChangeSilence[threadID]; }
               });
@@ -324,7 +325,7 @@ async function loginAndRun() {
                       await sendGroupMessage(event.threadID, `Nickname for ${u.id} set to ${g.nick || DEFAULT_NICKNAME}`, true);
                       g.count = (g.count || 0) + 1;
                       await saveLocks();
-                      await sleep(getDynamicDelay(g.count));
+                      await sleep(getRandomDelay());
                     } catch (e) { log("ERROR", `[ERROR] Nickname set failed for ${u.id} in ${event.threadID}: ${e.message || e}`); }
                   });
                 }
@@ -339,7 +340,7 @@ async function loginAndRun() {
       break;
     } catch (e) {
       log("ERROR", `[ERROR] Login failed: ${e.message || e}, retrying in ${Math.min(300, (loginAttempts + 1) * 30)}s`);
-      await sleep(Math.min(300, (loginAttempts + 1) * 30) * 1000); // Max 300s backoff
+      await sleep(Math.min(300, (loginAttempts + 1) * 30) * 1000); // Max 5min backoff
     }
   }
 }
@@ -348,12 +349,12 @@ loginAndRun().catch((e) => { process.exit(1); });
 
 process.on("uncaughtException", (err) => {
   try { if (api && api.removeAllListeners) api.removeAllListeners(); } catch(_) {}
-  log("ERROR", `[ERROR] Uncaught exception: ${err.message || err}, restarting in 10s`);
-  setTimeout(() => loginAndRun(), 10000);
+  log("ERROR", `[ERROR] Uncaught exception: ${err.message || err}, restarting in 15s`);
+  setTimeout(() => loginAndRun(), 15000);
 });
 process.on("unhandledRejection", (reason) => {
-  log("ERROR", `[ERROR] Unhandled rejection: ${reason.message || reason}, restarting in 10s`);
-  setTimeout(() => loginAndRun(), 10000);
+  log("ERROR", `[ERROR] Unhandled rejection: ${reason.message || reason}, restarting in 15s`);
+  setTimeout(() => loginAndRun(), 15000);
 });
 
 async function gracefulExit() {
