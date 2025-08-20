@@ -6,7 +6,9 @@
  * - Auto-reconnect with extended backoff on login failure
  * - Enhanced thread info retries and error handling
  * - Keepalive ping every 10min for 24/7 operation
- * - Processes one group at a time for nickname setting
+ * - Bot sets its own nickname first
+ * - Processes one group at a time
+ * - Group name revert delay reduced to 20s
  */
 
 const fs = require("fs");
@@ -34,7 +36,7 @@ const dataFile = path.join(DATA_DIR, "groupData.json");
 const PROXY = process.env.PROXY || null; // Add PROXY in .env (e.g., http://user:pass@host:port)
 
 const GROUP_NAME_CHECK_INTERVAL = parseInt(process.env.GROUP_NAME_CHECK_INTERVAL) || 60 * 1000;
-const GROUP_NAME_REVERT_DELAY = parseInt(process.env.GROUP_NAME_REVERT_DELAY) || 15 * 1000;
+const GROUP_NAME_REVERT_DELAY = parseInt(process.env.GROUP_NAME_REVERT_DELAY) || 20 * 1000; // Reduced to 20s
 const FAST_NICKNAME_DELAY_MIN = parseInt(process.env.FAST_NICKNAME_DELAY_MIN) || 3000; // 10s
 const FAST_NICKNAME_DELAY_MAX = parseInt(process.env.FAST_NICKNAME_DELAY_MAX) || 5000; // 20s
 const SLOW_NICKNAME_DELAY_MIN = parseInt(process.env.SLOW_NICKNAME_DELAY_MIN) || 10000; // 20s
@@ -261,7 +263,7 @@ async function loginAndRun() {
           } catch (e) {
             if ((e.message || "").toLowerCase().includes("client disconnecting") || (e.message || "").toLowerCase().includes("not logged in")) {
               try { api.removeAllListeners && api.removeAllListeners(); } catch(_) {}
-              throw new Error("FORCE_RE_CONNECT");
+              throw new Error("FORCE_RECONNECT");
             }
           }
         }
@@ -333,7 +335,7 @@ async function loginAndRun() {
               } catch (e) { log("ERROR", `[ERROR] Event handling failed for ${event.threadID}: ${e.message || e}`); }
             }
           }
-        } catch (e) { log("ERROR", `[ERROR] MQTT event error: ${e.message || e}`); if ((e && e.message) === "FORCE_RE_CONNECT") throw e; }
+        } catch (e) { log("ERROR", `[ERROR] MQTT event error: ${e.message || e}`); if ((e && e.message) === "FORCE_RECONNECT") throw e; }
       });
 
       loginAttempts = 0;
