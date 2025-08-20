@@ -1,5 +1,5 @@
 /**
- * Updated index.js for 20+ groups with human-like behavior
+ * Updated index.js for 20+ groups with enhanced stability
  * - Supports proxy/VPN configuration via .env
  * - Prevents nickname and group name changes with strict reverting
  * - Reduced rate limit to avoid blocks (MAX_PER_TICK=1, slower delays)
@@ -36,7 +36,7 @@ const dataFile = path.join(DATA_DIR, "groupData.json");
 const PROXY = process.env.PROXY || null; // Add PROXY in .env (e.g., http://user:pass@host:port)
 
 const GROUP_NAME_CHECK_INTERVAL = parseInt(process.env.GROUP_NAME_CHECK_INTERVAL) || 60 * 1000;
-const GROUP_NAME_REVERT_DELAY = parseInt(process.env.GROUP_NAME_REVERT_DELAY) || 20 * 1000; // Reduced to 20s
+const GROUP_NAME_REVERT_DELAY = parseInt(process.env.GROUP_NAME_REVERT_DELAY) || 47 * 1000; // 47s
 const FAST_NICKNAME_DELAY_MIN = parseInt(process.env.FAST_NICKNAME_DELAY_MIN) || 3000; // 10s
 const FAST_NICKNAME_DELAY_MAX = parseInt(process.env.FAST_NICKNAME_DELAY_MAX) || 5000; // 20s
 const SLOW_NICKNAME_DELAY_MIN = parseInt(process.env.SLOW_NICKNAME_DELAY_MIN) || 10000; // 20s
@@ -164,6 +164,20 @@ async function loadAppState() {
 
 async function refreshAppState() {
   try { const newAppState = api.getAppState(); await fsp.writeFile(appStatePath, JSON.stringify(newAppState, null, 2)); log("INFO", "Appstate refreshed."); } catch (e) {}
+}
+
+async function humanLikeActivity() {
+  if (!ENABLE_HUMAN_LIKE || !api) return;
+  const threadIDs = Object.keys(groupLocks).filter(t => groupLocks[t].enabled);
+  if (!threadIDs.length) return;
+  const randomThread = threadIDs[Math.floor(Math.random() * threadIDs.length)];
+  const actions = ["👍", "😄", "Hey guys, all good?", "Nice group!"];
+  const action = actions[Math.floor(Math.random() * actions.length)];
+  try {
+    if (action === "👍" || action === "😄") await new Promise((res, rej) => api.sendMessage({ body: "", attachment: [{ type: "reaction", reaction: action }] }, randomThread, (err) => (err ? rej(err) : res())));
+    else await new Promise((res, rej) => api.sendMessage({ body: action }, randomThread, (err) => (err ? rej(err) : res())));
+    log("INFO", `[HUMAN] Sent ${action} in ${randomThread}`);
+  } catch (e) { log("ERROR", `[ERROR] Human-like action failed: ${e.message || e}`); }
 }
 
 async function initCheckLoop(apiObj) {
@@ -341,8 +355,8 @@ async function loginAndRun() {
       loginAttempts = 0;
       break;
     } catch (e) {
-      log("ERROR", `[ERROR] Login failed: ${e.message || e}, retrying in ${Math.min(600, (loginAttempts + 1) * 60)}s`);
-      await sleep(Math.min(600, (loginAttempts + 1) * 60) * 1000); // Max 10min backoff
+      log("ERROR", `[ERROR] Login failed: ${e.message || e}, retrying in ${Math.min(600, (loginAttempts + 1) * 30)}s`);
+      await sleep(Math.min(600, (loginAttempts + 1) * 30) * 1000); // Max 10min backoff
     }
   }
 }
