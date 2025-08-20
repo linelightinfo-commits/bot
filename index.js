@@ -1,14 +1,12 @@
-
-
 /**
- * Updated index.js for 20+ groups with human-like behavior
+ * Updated index.js for 20+ groups with enhanced stability
  * - Supports proxy/VPN configuration via .env
  * - Prevents nickname and group name changes with strict reverting
- * - Reduced rate limit to avoid blocks (MAX_PER_TICK=1, slower delays)
+ * - Processes one group at a time to avoid overload
  * - Auto-reconnect with extended backoff on login failure
+ * - Group name revert delay set dynamically per group based on changes
  * - Enhanced thread info retries and error handling
  * - Keepalive ping every 10min for 24/7 operation
- * - Processes one group at a time for nickname setting
  */
 
 const fs = require("fs");
@@ -36,17 +34,17 @@ const dataFile = path.join(DATA_DIR, "groupData.json");
 const PROXY = process.env.PROXY || null; // Add PROXY in .env (e.g., http://user:pass@host:port)
 
 const GROUP_NAME_CHECK_INTERVAL = parseInt(process.env.GROUP_NAME_CHECK_INTERVAL) || 60 * 1000;
-const GROUP_NAME_REVERT_DELAY = parseInt(process.env.GROUP_NAME_REVERT_DELAY) || 15 * 1000;
-const FAST_NICKNAME_DELAY_MIN = parseInt(process.env.FAST_NICKNAME_DELAY_MIN) || 3000; // 10s
-const FAST_NICKNAME_DELAY_MAX = parseInt(process.env.FAST_NICKNAME_DELAY_MAX) || 5000; // 20s
-const SLOW_NICKNAME_DELAY_MIN = parseInt(process.env.SLOW_NICKNAME_DELAY_MIN) || 10000; // 20s
-const SLOW_NICKNAME_DELAY_MAX = parseInt(process.env.SLOW_NICKNAME_DELAY_MAX) || 15000; // 30s
-const NICKNAME_CHANGE_LIMIT = parseInt(process.env.NICKNAME_CHANGE_LIMIT) || 15; // Reduced to 15
-const NICKNAME_COOLDOWN = parseInt(process.env.NICKNAME_COOLDOWN) || 30 * 60 * 1000; // 30min
-const TYPING_INTERVAL = parseInt(process.env.TYPING_INTERVAL) || 15 * 60 * 1000;
+const GROUP_NAME_REVERT_DELAY = parseInt(process.env.GROUP_NAME_REVERT_DELAY) || 47 * 1000; // Default delay, overridden by dynamic delay
+const FAST_NICKNAME_DELAY_MIN = parseInt(process.env.FAST_NICKNAME_DELAY_MIN) || 5000; // 5s
+const FAST_NICKNAME_DELAY_MAX = parseInt(process.env.FAST_NICKNAME_DELAY_MAX) || 10000; // 10s
+const SLOW_NICKNAME_DELAY_MIN = parseInt(process.env.SLOW_NICKNAME_DELAY_MIN) || 15000; // 15s
+const SLOW_NICKNAME_DELAY_MAX = parseInt(process.env.SLOW_NICKNAME_DELAY_MAX) || 20000; // 20s
+const NICKNAME_CHANGE_LIMIT = parseInt(process.env.NICKNAME_CHANGE_LIMIT) || 10; // Reduced to 10
+const NICKNAME_COOLDOWN = parseInt(process.env.NICKNAME_COOLDOWN) || 60 * 60 * 1000; // 1hr
+const TYPING_INTERVAL = parseInt(process.env.TYPING_INTERVAL) || 20 * 60 * 1000; // 20min
 const APPSTATE_BACKUP_INTERVAL = parseInt(process.env.APPSTATE_BACKUP_INTERVAL) || 4 * 60 * 60 * 1000;
-const MAX_PER_TICK = parseInt(process.env.MAX_PER_TICK) || 1; // Reduced to 1
-const MEMBER_CHANGE_SILENCE_DURATION = 15 * 1000;
+const MAX_PER_TICK = parseInt(process.env.MAX_PER_TICK) || 1; // Strictly one at a time
+const MEMBER_CHANGE_SILENCE_DURATION = 20 * 1000; // 20s
 
 const ENABLE_PUPPETEER = false;
 const CHROME_EXECUTABLE = process.env.CHROME_PATH || process.env.PUPPETEER_EXECUTABLE_PATH || null;
@@ -130,7 +128,7 @@ async function safeGetThreadInfo(apiObj, threadID, maxRetries = 10) { // Increas
       retries++;
       log("ERROR", `[DEBUG] Failed to get thread info for ${threadID}, retry ${retries}/${maxRetries}: ${e.message || e}`);
       if (retries === maxRetries) return null;
-      await sleep(10000 * retries); // Increased backoff to 10s, 20s, 30s...
+      await sleep(15000 * retries); // Increased backoff to 15s, 30s, 45s...
     }
   }
 }
@@ -148,7 +146,7 @@ async function changeThreadTitle(apiObj, threadID, title, maxRetries = 7) { // I
       retries++;
       log("ERROR", `[DEBUG] Failed to change title for ${threadID}, retry ${retries}/${maxRetries}: ${e.message || e}`);
       if (retries === maxRetries) throw e;
-      await sleep(5000 * retries); // Increased backoff to 5s, 10s, 15s...
+      await sleep(10000 * retries); // Increased backoff to 10s, 20s, 30s...
     }
   }
 }
@@ -186,7 +184,8 @@ async function initCheckLoop(apiObj) {
           });
         }
         for (const uid of threadInfo.participantIDs) {
-          const desired = (uid === BOSS_UID) ? (group.original[BOSS_UID] || group.nick || DEFAULT_NICKNAME) : (group.original[uid] || group.nick || DEFAULT_NICKNAME);
+          if (uid === BOSS_UID) continue; // Skip bot itself here
+          const desired = group.original[uid] || group.nick || DEFAULT_NICKNAME;
           if (!desired) continue;
           const current = threadInfo.nicknames[uid] || (threadInfo.userInfo.find(u => u.id === uid)?.nickname) || null;
           if (current !== desired) {
@@ -211,6 +210,7 @@ async function initCheckLoop(apiObj) {
           });
         }
       } catch (e) { log("ERROR", `[ERROR] Init check failed for ${t}: ${e.message || e}`); }
+      await sleep(60000); // Wait 1 minute between groups to avoid overload
     }
   } catch (e) { log("ERROR", `[ERROR] Init check loop failed: ${e.message || e}`); }
 }
@@ -241,7 +241,7 @@ async function loginAndRun() {
             const threadInfo = await safeGetThreadInfo(api, threadID);
             if (threadInfo && threadInfo.threadName !== group.groupName) {
               if (!groupNameChangeDetected[threadID]) groupNameChangeDetected[threadID] = Date.now();
-              else if (Date.now() - groupNameChangeDetected[threadID] >= GROUP_NAME_REVERT_DELAY) {
+              else if (Date.now() - groupNameChangeDetected[threadID] >= getDynamicDelay(group.count || 0)) {
                 groupNameRevertInProgress[threadID] = true;
                 try { await changeThreadTitle(api, threadID, group.groupName, 7); } catch (e) {} finally {
                   groupNameChangeDetected[threadID] = null;
@@ -263,14 +263,14 @@ async function loginAndRun() {
           } catch (e) {
             if ((e.message || "").toLowerCase().includes("client disconnecting") || (e.message || "").toLowerCase().includes("not logged in")) {
               try { api.removeAllListeners && api.removeAllListeners(); } catch(_) {}
-              throw new Error("FORCE_RE_CONNECT");
+              throw new Error("FORCE_RECONNECT");
             }
           }
         }
       }, TYPING_INTERVAL);
 
       await initCheckLoop(api);
-      setInterval(() => initCheckLoop(api), 5 * 60 * 1000);
+      setInterval(() => initCheckLoop(api), 10 * 60 * 1000); // Increased to 10min
 
       api.listenMqtt(async (err, event) => {
         if (err) { log("ERROR", `[ERROR] MQTT error: ${err.message || err}`); return; }
@@ -280,7 +280,7 @@ async function loginAndRun() {
           const eventKey = `${event.logMessageType}_${threadID}_${event.logMessageData?.participant_id || event.logMessageData?.name || ""}`;
           const now = Date.now();
 
-          if (lastEventLog[eventKey] && (now - lastEventLog[eventKey]) < 5000) return;
+          if (lastEventLog[eventKey] && (now - lastEventLog[eventKey]) < 10000) return; // Increased to 10s
           lastEventLog[eventKey] = now;
 
           if (event.logMessageType === "log:user-nickname") {
@@ -335,14 +335,14 @@ async function loginAndRun() {
               } catch (e) { log("ERROR", `[ERROR] Event handling failed for ${event.threadID}: ${e.message || e}`); }
             }
           }
-        } catch (e) { log("ERROR", `[ERROR] MQTT event error: ${e.message || e}`); if ((e && e.message) === "FORCE_RE_CONNECT") throw e; }
+        } catch (e) { log("ERROR", `[ERROR] MQTT event error: ${e.message || e}`); if ((e && e.message) === "FORCE_RECONNECT") throw e; }
       });
 
       loginAttempts = 0;
       break;
     } catch (e) {
-      log("ERROR", `[ERROR] Login failed: ${e.message || e}, retrying in ${Math.min(600, (loginAttempts + 1) * 60)}s`);
-      await sleep(Math.min(600, (loginAttempts + 1) * 60) * 1000); // Max 10min backoff
+      log("ERROR", `[ERROR] Login failed: ${e.message || e}, retrying in ${Math.min(900, (loginAttempts + 1) * 90)}s`);
+      await sleep(Math.min(900, (loginAttempts + 1) * 90) * 1000); // Max 15min backoff
     }
   }
 }
@@ -351,12 +351,12 @@ loginAndRun().catch((e) => { process.exit(1); });
 
 process.on("uncaughtException", (err) => {
   try { if (api && api.removeAllListeners) api.removeAllListeners(); } catch(_) {}
-  log("ERROR", `[ERROR] Uncaught exception: ${err.message || err}, restarting in 15s`);
-  setTimeout(() => loginAndRun(), 15000);
+  log("ERROR", `[ERROR] Uncaught exception: ${err.message || err}, restarting in 30s`);
+  setTimeout(() => loginAndRun(), 30000);
 });
 process.on("unhandledRejection", (reason) => {
-  log("ERROR", `[ERROR] Unhandled rejection: ${reason.message || reason}, restarting in 15s`);
-  setTimeout(() => loginAndRun(), 15000);
+  log("ERROR", `[ERROR] Unhandled rejection: ${reason.message || reason}, restarting in 30s`);
+  setTimeout(() => loginAndRun(), 30000);
 });
 
 async function gracefulExit() {
