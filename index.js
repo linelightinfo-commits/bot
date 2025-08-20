@@ -6,7 +6,8 @@
  * - Auto-reconnect with extended backoff on login failure
  * - Group name revert delay set dynamically per group based on changes
  * - Enhanced thread info retries and error handling
- * - Keepalive ping every 10min for 24/7 operation
+ * - Keepalive ping every 5min for 24/7 operation
+ * - Appstate backup every 6hr with timestamp
  */
 
 const fs = require("fs");
@@ -42,7 +43,7 @@ const SLOW_NICKNAME_DELAY_MAX = parseInt(process.env.SLOW_NICKNAME_DELAY_MAX) ||
 const NICKNAME_CHANGE_LIMIT = parseInt(process.env.NICKNAME_CHANGE_LIMIT) || 10; // Reduced to 10
 const NICKNAME_COOLDOWN = parseInt(process.env.NICKNAME_COOLDOWN) || 60 * 60 * 1000; // 1hr
 const TYPING_INTERVAL = parseInt(process.env.TYPING_INTERVAL) || 20 * 60 * 1000; // 20min
-const APPSTATE_BACKUP_INTERVAL = parseInt(process.env.APPSTATE_BACKUP_INTERVAL) || 4 * 60 * 60 * 1000;
+const APPSTATE_BACKUP_INTERVAL = parseInt(process.env.APPSTATE_BACKUP_INTERVAL) || 6 * 60 * 60 * 1000; // 6hr
 const MAX_PER_TICK = parseInt(process.env.MAX_PER_TICK) || 1; // Strictly one at a time
 const MEMBER_CHANGE_SILENCE_DURATION = 20 * 1000; // 20s
 
@@ -112,7 +113,7 @@ async function runQueue(threadID) {
   q.running = false;
 }
 
-async function safeGetThreadInfo(apiObj, threadID, maxRetries = 10) { // Increased to 10
+async function safeGetThreadInfo(apiObj, threadID, maxRetries = 10) {
   let retries = 0;
   while (retries < maxRetries) {
     try {
@@ -133,7 +134,7 @@ async function safeGetThreadInfo(apiObj, threadID, maxRetries = 10) { // Increas
   }
 }
 
-async function changeThreadTitle(apiObj, threadID, title, maxRetries = 7) { // Increased to 7
+async function changeThreadTitle(apiObj, threadID, title, maxRetries = 7) {
   if (!apiObj) throw new Error("No api");
   let retries = 0;
   while (retries < maxRetries) {
@@ -160,8 +161,14 @@ async function loadAppState() {
   } catch (e) { throw new Error(`Cannot load appstate.json: ${e.message || e}`); }
 }
 
-async function refreshAppState() {
-  try { const newAppState = api.getAppState(); await fsp.writeFile(appStatePath, JSON.stringify(newAppState, null, 2)); log("INFO", "Appstate refreshed."); } catch (e) {}
+async function backupAppState() {
+  try {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const backupPath = path.join(DATA_DIR, `appstate_backup_${timestamp}.json`);
+    const appState = api.getAppState();
+    await fsp.writeFile(backupPath, JSON.stringify(appState, null, 2));
+    log("INFO", `Appstate backup saved to ${backupPath}`);
+  } catch (e) { log("ERROR", `Appstate backup failed: ${e.message || e}`); }
 }
 
 async function initCheckLoop(apiObj) {
@@ -184,7 +191,7 @@ async function initCheckLoop(apiObj) {
           });
         }
         for (const uid of threadInfo.participantIDs) {
-          if (uid === BOSS_UID) continue; // Skip bot itself here
+          if (uid === BOSS_UID) continue;
           const desired = group.original[uid] || group.nick || DEFAULT_NICKNAME;
           if (!desired) continue;
           const current = threadInfo.nicknames[uid] || (threadInfo.userInfo.find(u => u.id === uid)?.nickname) || null;
@@ -229,7 +236,7 @@ async function loginAndRun() {
       log("INFO", `Logged in as: ${api.getCurrentUserID ? api.getCurrentUserID() : "(unknown)"}`);
 
       await loadLocks();
-      setInterval(refreshAppState, APPSTATE_BACKUP_INTERVAL);
+      setInterval(backupAppState, APPSTATE_BACKUP_INTERVAL); // Appstate backup every 6hr
       setInterval(async () => {
         const threadIDs = Object.keys(groupLocks);
         for (let i = 0; i < Math.min(MAX_PER_TICK, threadIDs.length); i++) {
@@ -254,7 +261,9 @@ async function loginAndRun() {
       }, GROUP_NAME_CHECK_INTERVAL);
 
       setInterval(async () => {
-        for (const id of Object.keys(groupLocks)) {
+        const threadIDs = Object.keys(groupLocks);
+        for (let i = 0; i < Math.min(MAX_PER_TICK, threadIDs.length); i++) {
+          const id = threadIDs[i];
           try {
             const g = groupLocks[id];
             if (!g || (!g.gclock && !g.enabled)) continue;
@@ -269,8 +278,7 @@ async function loginAndRun() {
         }
       }, TYPING_INTERVAL);
 
-      await initCheckLoop(api);
-      setInterval(() => initCheckLoop(api), 10 * 60 * 1000); // Increased to 10min
+      setInterval(() => initCheckLoop(api), 10 * 60 * 1000); // 10min loop
 
       api.listenMqtt(async (err, event) => {
         if (err) { log("ERROR", `[ERROR] MQTT error: ${err.message || err}`); return; }
@@ -280,7 +288,7 @@ async function loginAndRun() {
           const eventKey = `${event.logMessageType}_${threadID}_${event.logMessageData?.participant_id || event.logMessageData?.name || ""}`;
           const now = Date.now();
 
-          if (lastEventLog[eventKey] && (now - lastEventLog[eventKey]) < 10000) return; // Increased to 10s
+          if (lastEventLog[eventKey] && (now - lastEventLog[eventKey]) < 10000) return;
           lastEventLog[eventKey] = now;
 
           if (event.logMessageType === "log:user-nickname") {
