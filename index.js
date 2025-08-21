@@ -1,9 +1,11 @@
 /**
- * Updated index.js with enhanced logging for group name revert
- * - Group name reverts every 47s with independent timers per group
+ * Updated index.js with optimized speed for group name revert
+ * - Reduced delay between group checks to 10s
+ * - Increased MAX_PER_TICK for parallel processing
+ * - Added timestamps to logs for delay tracking
+ * - Group name reverts every 47s with independent timers
  * - Nickname lock controlled via nlock (default false)
  * - Supports proxy/VPN configuration via .env
- * - Processes one group at a time to avoid overload
  * - Auto-reconnect with extended backoff on login failure
  * - Enhanced thread info retries and error handling
  * - Keepalive ping every 5min for 24/7 operation
@@ -18,7 +20,10 @@ const loginLib = typeof ws3 === "function" ? ws3 : (ws3.default || ws3.login || 
 require("dotenv").config();
 
 const C = { reset: "\x1b[0m", green: "\x1b[32m", red: "\x1b[31m" };
-function log(type, ...a) { console.log(`${type === "ERROR" ? C.red : C.green}[BOT]${C.reset}`, ...a); }
+function log(type, ...a) { 
+  const timestamp = new Date().toISOString().replace('T', ' ').split('.')[0];
+  console.log(`${type === "ERROR" ? C.red : C.green}[BOT] [${timestamp}]${C.reset}`, ...a); 
+}
 
 const express = require("express");
 const app = express();
@@ -44,7 +49,7 @@ const NICKNAME_CHANGE_LIMIT = parseInt(process.env.NICKNAME_CHANGE_LIMIT) || 10;
 const NICKNAME_COOLDOWN = parseInt(process.env.NICKNAME_COOLDOWN) || 60 * 60 * 1000;
 const TYPING_INTERVAL = parseInt(process.env.TYPING_INTERVAL) || 20 * 60 * 1000;
 const APPSTATE_BACKUP_INTERVAL = parseInt(process.env.APPSTATE_BACKUP_INTERVAL) || 6 * 60 * 60 * 1000;
-const MAX_PER_TICK = parseInt(process.env.MAX_PER_TICK) || 1;
+const MAX_PER_TICK = parseInt(process.env.MAX_PER_TICK) || 3; // Increased to 3 for parallel processing
 const MEMBER_CHANGE_SILENCE_DURATION = 20 * 1000;
 
 const ENABLE_PUPPETEER = false;
@@ -130,7 +135,7 @@ async function safeGetThreadInfo(apiObj, threadID, maxRetries = 10) {
       retries++;
       log("ERROR", `[DEBUG] Failed to get thread info for ${threadID}, retry ${retries}/${maxRetries}: ${e.message || e}`);
       if (retries === maxRetries) return null;
-      await sleep(15000 * retries);
+      await sleep(5000 * retries); // Reduced retry delay to 5s
     }
   }
 }
@@ -148,7 +153,7 @@ async function changeThreadTitle(apiObj, threadID, title, maxRetries = 7) {
       retries++;
       log("ERROR", `[DEBUG] Failed to change title for ${threadID}, retry ${retries}/${maxRetries}: ${e.message || e}`);
       if (retries === maxRetries) throw e;
-      await sleep(10000 * retries);
+      await sleep(5000 * retries); // Reduced retry delay to 5s
     }
   }
 }
@@ -220,7 +225,7 @@ async function initCheckLoop(apiObj) {
           });
         }
       } catch (e) { log("ERROR", `[ERROR] Init check failed for ${t}: ${e.message || e}`); }
-      await sleep(60000);
+      await sleep(10000); // Reduced to 10s between groups
     }
   } catch (e) { log("ERROR", `[ERROR] Init check loop failed: ${e.message || e}`); }
 }
@@ -242,7 +247,8 @@ async function loginAndRun() {
       setInterval(backupAppState, APPSTATE_BACKUP_INTERVAL);
       setInterval(async () => {
         const threadIDs = Object.keys(groupLocks).filter(t => groupLocks[t].enabled);
-        for (let threadID of threadIDs) {
+        for (let i = 0; i < Math.min(MAX_PER_TICK, threadIDs.length); i++) {
+          const threadID = threadIDs[i];
           const group = groupLocks[threadID];
           if (!group || !group.gclock) continue;
           if (groupNameRevertInProgress[threadID]) continue;
