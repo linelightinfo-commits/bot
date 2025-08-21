@@ -1,5 +1,5 @@
 /**
- * Updated index.js with group name revert and selective nickname lock
+ * Updated index.js with enhanced logging for group name revert
  * - Group name reverts every 47s with independent timers per group
  * - Nickname lock controlled via nlock (default false)
  * - Supports proxy/VPN configuration via .env
@@ -36,8 +36,8 @@ const PROXY = process.env.PROXY || null;
 
 const GROUP_NAME_CHECK_INTERVAL = parseInt(process.env.GROUP_NAME_CHECK_INTERVAL) || 47 * 1000; // 47s per group
 const GROUP_NAME_REVERT_DELAY = parseInt(process.env.GROUP_NAME_REVERT_DELAY) || 47 * 1000; // 47s delay
-const FAST_NICKNAME_DELAY_MIN = parseInt(process.env.FAST_NICKNAME_DELAY_MIN) || 25000; // 25s
-const FAST_NICKNAME_DELAY_MAX = parseInt(process.env.FAST_NICKNAME_DELAY_MAX) || 35000; // 35s
+const FAST_NICKNAME_DELAY_MIN = parseInt(process.env.FAST_NICKNAME_DELAY_MIN) || 6000; // 25s
+const FAST_NICKNAME_DELAY_MAX = parseInt(process.env.FAST_NICKNAME_DELAY_MAX) || 10000; // 35s
 const SLOW_NICKNAME_DELAY_MIN = parseInt(process.env.SLOW_NICKNAME_DELAY_MIN) || 15000;
 const SLOW_NICKNAME_DELAY_MAX = parseInt(process.env.SLOW_NICKNAME_DELAY_MAX) || 20000;
 const NICKNAME_CHANGE_LIMIT = parseInt(process.env.NICKNAME_CHANGE_LIMIT) || 10;
@@ -181,6 +181,7 @@ async function initCheckLoop(apiObj) {
       try {
         const threadInfo = await safeGetThreadInfo(apiObj, t, 10);
         if (!threadInfo) { log("ERROR", `[ERROR] Failed to load thread info for ${t}`); continue; }
+        log("INFO", `[CHECK] Monitoring ${t} - Current name: "${threadInfo.threadName}"`);
         const botNick = group.original[BOSS_UID] || group.nick || DEFAULT_NICKNAME;
         if (group.nlock && threadInfo.nicknames[BOSS_UID] !== botNick) {
           queueTask(t, async () => {
@@ -191,7 +192,7 @@ async function initCheckLoop(apiObj) {
             } catch (e) { log("ERROR", `[ERROR] Nickname set failed for ${t}: ${e.message || e}`); }
           });
         }
-        if (group.nlock) { // Only change nicknames if nlock is true
+        if (group.nlock) {
           for (const uid of Object.keys(group.original)) {
             if (uid === BOSS_UID) continue;
             const desired = group.original[uid];
@@ -247,12 +248,14 @@ async function loginAndRun() {
           if (groupNameRevertInProgress[threadID]) continue;
           try {
             const threadInfo = await safeGetThreadInfo(api, threadID);
+            log("INFO", `[CHECK] Checking ${threadID} - Current name: "${threadInfo ? threadInfo.threadName : 'N/A'}"`);
             if (threadInfo && threadInfo.threadName !== group.groupName) {
               if (!groupNameChangeDetected[threadID]) groupNameChangeDetected[threadID] = Date.now();
               else if (Date.now() - groupNameChangeDetected[threadID] >= GROUP_NAME_REVERT_DELAY) {
                 groupNameRevertInProgress[threadID] = true;
                 try { await changeThreadTitle(api, threadID, group.groupName, 7); } catch (e) {} finally {
-                  groupNameChangeDetected[threadID] = Date.now(); // Reset timer for next check
+                  log("INFO", `[SUCCESS] Reverted ${threadID} to "${group.groupName}"`);
+                  groupNameChangeDetected[threadID] = Date.now(); // Reset timer
                   groupNameRevertInProgress[threadID] = false;
                 }
               }
@@ -295,7 +298,7 @@ async function loginAndRun() {
 
           if (event.logMessageType === "log:user-nickname") {
             const group = groupLocks[threadID];
-            if (!group || !group.enabled || group.cooldown || !group.nlock) return; // Skip if nlock is false
+            if (!group || !group.enabled || group.cooldown || !group.nlock) return;
 
             const uid = event.logMessageData?.participant_id;
             const currentNick = event.logMessageData?.nickname;
