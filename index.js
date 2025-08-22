@@ -42,8 +42,8 @@ const dataFile = path.join(DATA_DIR, "groupData.json");
 const logFile = path.join(DATA_DIR, "bot.log");
 const PROXY = process.env.PROXY || null;
 
-const MIN_INTERVAL = 47 * 1000; // Start at 47s as requested
-const MAX_INTERVAL = 60 * 1000; // Scales to 60s with load
+const MIN_INTERVAL = 60 * 1000; // Start at 47s as requested
+const MAX_INTERVAL = 70 * 1000; // Scales to 60s with load
 let currentInterval = MIN_INTERVAL;
 const GROUP_NAME_REVERT_DELAY = parseInt(process.env.GROUP_NAME_REVERT_DELAY) || MIN_INTERVAL; // 47s delay
 const FAST_NICKNAME_DELAY_MIN = parseInt(process.env.FAST_NICKNAME_DELAY_MIN) || 5000; // 25s
