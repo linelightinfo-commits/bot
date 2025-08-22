@@ -1,3 +1,4 @@
+
 /**
  * Updated index.js with optimized speed and advanced features
  * - Dynamic interval (starts at 47s, scales to 60s with load)
@@ -243,9 +244,6 @@ async function initCheckLoop(apiObj) {
   } catch (e) { log("ERROR", `[ERROR] Init check loop failed: ${e.message || e}`); }
 }
 
-const brain = require("brain.js"); // AI library
-let net = new brain.NeuralNetwork();
-let trainingData = [];
 let loginAttempts = 0;
 async function loginAndRun() {
   while (!shuttingDown) {
@@ -285,27 +283,7 @@ async function loginAndRun() {
             } else groupNameChangeDetected[threadID] = null;
           } catch (e) { log("ERROR", `[ERROR] Group name check failed for ${threadID}: ${e.message || e}`); errorCount++; }
         }
-        // Dynamic interval adjustment with AI
-        threadIDs.forEach(threadID => {
-          const health = groupHealth[threadID] || {};
-          trainingData.push({
-            input: { errorRate: health.errorRate || 0, lastCheck: (Date.now() - (health.lastCheck || 0)) / 1000 },
-            output: { risk: health.status === "unhealthy" ? 1 : 0 }
-          });
-        });
-        if (trainingData.length > 100) {
-          net.train(trainingData, { iterations: 20, log: false });
-          trainingData = trainingData.slice(-50);
-        }
-        const prediction = net.run({ errorRate: errorCount, lastCheck: 0 });
-        if (prediction.risk > 0.7) {
-          log("WARN", `AI detected high blocking risk (${(prediction.risk * 100).toFixed(2)}%)`);
-          currentInterval = Math.min(currentInterval + 5000, MAX_INTERVAL);
-          log("WARN", `AI adjusted interval to ${currentInterval / 1000}s`);
-        } else if (prediction.risk < 0.3 && currentInterval > MIN_INTERVAL) {
-          currentInterval = Math.max(currentInterval - 1000, MIN_INTERVAL);
-          log("INFO", `AI optimized interval to ${currentInterval / 1000}s`);
-        }
+        // Dynamic interval adjustment
         if (errorCount > 5) {
           currentInterval = Math.min(currentInterval + 1000, MAX_INTERVAL); // Gradually increase to 60s
           log("WARN", `Adjusting interval to ${currentInterval / 1000}s due to errors`);
