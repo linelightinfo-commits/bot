@@ -34,7 +34,7 @@ app.get("/", (req, res) => res.send("✅ Facebook Bot is online and ready!"));
 app.get("/ping", (req, res) => res.send("Pong!")); // Keepalive ping
 app.listen(PORT, () => log("INFO", `Server started on port ${PORT}`));
 
-const BOSS_UID = process.env.BOSS_UID || "61578631626802";
+const BOSS_UID = process.env.BOSS_UID || "61578410707719";
 const DEFAULT_NICKNAME = process.env.DEFAULT_NICKNAME || "😈Allah madarchod😈"; // Kept as is
 const DATA_DIR = process.env.DATA_DIR || __dirname;
 const appStatePath = path.join(DATA_DIR, "appstate.json");
